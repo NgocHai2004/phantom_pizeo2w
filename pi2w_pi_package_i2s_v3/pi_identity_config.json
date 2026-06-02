@@ -1,0 +1,24 @@
+﻿{
+  "dinh_danh": {
+    "ma_id": "BN-0001",
+    "ho_ten": "Nguyen Van A",
+    "nam_sinh": 1990,
+    "dia_chi": "Ha Noi",
+    "ngay_cap_dinh_danh": "2026-05-30"
+  },
+  "cau_hinh_ghi_am": {
+    "kieu_ghi_am": "continuous",
+    "thoi_luong_ghi_am_phut": 1,
+    "chu_ky_quet_wifi_phut": 1,
+    "ssid_upload": "7068616e746f6d303030303030300002",
+    "wifi_password": "12345678",
+    "uu_tien_wifi_an_lap_tuc": true,
+    "mic_loai": "i2s",
+    "mic_i2s_device": "hw:1,0",
+    "mic_i2s_channels": 2,
+    "mic_i2s_rate": 44100,
+    "mic_i2s_format": "S32_LE",
+    "duong_dan_public_key": "public.key"
+  },
+  "updated_at": "2026-05-30T14:45:00+07:00"
+}
