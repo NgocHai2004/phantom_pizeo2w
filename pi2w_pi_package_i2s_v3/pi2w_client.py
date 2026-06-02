@@ -7,6 +7,7 @@ import threading
 import queue
 import hashlib
 import struct
+import math
 import json
 import re
 from datetime import datetime
@@ -912,6 +913,45 @@ def disconnect_upload_wifi_after_success(reason: str = "upload_success") -> None
 
 
 
+def _rms_dbfs_from_wav_tail(wav_path: pathlib.Path, sample_rate: int, channels: int, fmt: str) -> Optional[float]:
+    """Doc phan cuoi file WAV dang ghi, tinh RMS va tra ve dBFS."""
+    fmt_upper = fmt.upper()
+    if fmt_upper in ("S16_LE", "S16_BE"):
+        bytes_per_sample, max_val = 2, 32768.0
+        pack_char, endian = "h", "<" if fmt_upper == "S16_LE" else ">"
+    elif fmt_upper in ("S32_LE", "S32_BE", "S24_LE", "S24_BE"):
+        bytes_per_sample, max_val = 4, 2147483648.0
+        pack_char, endian = "i", "<" if "LE" in fmt_upper else ">"
+    else:
+        return None
+
+    frame_size = bytes_per_sample * channels
+    tail_bytes = sample_rate * 2 * frame_size  # doc 2 giay cuoi
+
+    try:
+        size = wav_path.stat().st_size
+        if size <= 44:
+            return None
+        data_size = size - 44
+        read_size = min(tail_bytes, data_size)
+        offset = 44 + (data_size - read_size)
+        with wav_path.open("rb") as f:
+            f.seek(offset)
+            raw = f.read(read_size)
+    except Exception:
+        return None
+
+    count = len(raw) // bytes_per_sample
+    if count == 0:
+        return None
+
+    samples = struct.unpack(f"{endian}{count}{pack_char}", raw[:count * bytes_per_sample])
+    rms = math.sqrt(sum(s * s for s in samples) / count)
+    if rms == 0:
+        return -96.0
+    return 20.0 * math.log10(rms / max_val)
+
+
 def record_wav_segment(wav_path: pathlib.Path, duration_sec: int) -> bool:
     cmd = [
         "arecord",
@@ -927,20 +967,56 @@ def record_wav_segment(wav_path: pathlib.Path, duration_sec: int) -> bool:
     t0 = time.time()
 
     try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            timeout=duration_sec + 15
-        )
+        proc = subprocess.Popen(cmd)
     except Exception as e:
         log(f"[REC] Exception: {e}")
         delete_wav_safely(wav_path, reason="record_exception")
         return False
 
+    stop_event = threading.Event()
+
+    def _level_monitor() -> None:
+        rate = int(_runtime_arecord_rate)
+        ch = int(_runtime_arecord_channels)
+        fmt = _runtime_arecord_format
+        elapsed_s = 0
+        while not stop_event.wait(5.0):
+            elapsed_s += 5
+            db = _rms_dbfs_from_wav_tail(wav_path, rate, ch, fmt)
+            if db is not None:
+                if db >= -20:
+                    label = "LOUD"
+                elif db >= -45:
+                    label = "normal"
+                else:
+                    label = "quiet"
+                log(f"[REC-LEVEL] t={elapsed_s}s dBFS={db:.1f} ({label})")
+
+    monitor = threading.Thread(target=_level_monitor, daemon=True, name="rec-level-monitor")
+    monitor.start()
+
+    rc = -1
+    try:
+        proc.wait(timeout=duration_sec + 15)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        rc = proc.returncode
+    except Exception as e:
+        log(f"[REC] Exception: {e}")
+        stop_event.set()
+        monitor.join(timeout=6)
+        delete_wav_safely(wav_path, reason="record_exception")
+        return False
+
+    stop_event.set()
+    monitor.join(timeout=6)
+
     elapsed = int((time.time() - t0) * 1000)
 
-    if proc.returncode != 0:
-        log(f"[REC] FAIL rc={proc.returncode} ms={elapsed} duration={duration_sec}s")
+    if rc != 0:
+        log(f"[REC] FAIL rc={rc} ms={elapsed} duration={duration_sec}s")
         delete_wav_safely(wav_path, reason="record_returncode_fail")
         return False
 
