@@ -10,12 +10,14 @@ import struct
 import math
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 import shutil
 import email as _email_mod
+import zipfile
+import io
 
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
@@ -58,10 +60,17 @@ REC_DIR = pathlib.Path.home() / "rec"
 PI_IDENTITY_CONFIG_PATH = REC_DIR / "pi_identity_config.json"
 PI_IDENTITY_CONFIG_TMP_PATH = REC_DIR / "pi_identity_config.tmp"
 
-SUPPORTED_RECORD_MODES = {"fixed_60s", "continuous", "manual"}
+SUPPORTED_RECORD_MODES = {"fixed_60s", "continuous", "manual", "vad", "interval"}
 DEFAULT_RECORD_MODE = "fixed_60s"
 AUTO_RECORD_SEC = 60
 DEFAULT_RECORD_MINUTES = 1
+DEFAULT_INTERVAL_MINUTES = 60
+
+# VAD defaults
+VAD_DEFAULT_THRESHOLD_DBFS = -41.0
+VAD_DEFAULT_SILENCE_TIMEOUT_SEC = 60
+VAD_DEFAULT_MAX_DURATION_SEC = 600
+VAD_DEFAULT_MONITOR_INTERVAL_SEC = 3
 DEFAULT_WIFI_RETRY_INTERVAL_SEC = WIFI_RETRY_INTERVAL_SEC
 DEFAULT_WIFI_RETRY_MINUTES = max(1, DEFAULT_WIFI_RETRY_INTERVAL_SEC // 60)
 DEFAULT_PREFER_HIDDEN_WIFI_IMMEDIATE = False
@@ -106,10 +115,16 @@ _runtime_arecord_rate = ARECORD_RATE
 _runtime_arecord_format = ARECORD_FORMAT
 _runtime_public_key_path = str(PHTM_KEY_PATH)
 _runtime_prefer_hidden_wifi_immediate = DEFAULT_PREFER_HIDDEN_WIFI_IMMEDIATE
+_runtime_vad_threshold_dbfs = VAD_DEFAULT_THRESHOLD_DBFS
+_runtime_vad_silence_timeout_sec = VAD_DEFAULT_SILENCE_TIMEOUT_SEC
+_runtime_vad_max_duration_sec = VAD_DEFAULT_MAX_DURATION_SEC
+_runtime_vad_monitor_interval_sec = VAD_DEFAULT_MONITOR_INTERVAL_SEC
+_runtime_interval_cycle_sec: int = DEFAULT_INTERVAL_MINUTES * 60  # chu ky giua 2 lan ghi (interval mode)
 _wifi_nmcli_lock = threading.Lock()
 
 # Event de bao wifi_manager_worker rescan ngay sau khi upload xong va ngat ket noi
 _wifi_upload_done_event = threading.Event()
+_time_offset_sec: float = 0.0  # PC time - system time, duoc cap nhat khi ket noi mgmt WiFi
 
 def log(msg: str) -> None:
     print(msg, flush=True)
@@ -136,10 +151,14 @@ def build_default_identity_config() -> dict:
             "nam_sinh": 1990,
             "dia_chi": "Ha Noi",
             "ngay_cap_dinh_danh": today,
+            "ten_thiet_bi": "Pi Zero 2W",
+            "id_thiet_bi": "DEVICE-0001",
+            "dia_chi_thiet_bi": "Ha Noi",
         },
         "cau_hinh_ghi_am": {
             "kieu_ghi_am": DEFAULT_RECORD_MODE,
             "thoi_luong_ghi_am_phut": DEFAULT_RECORD_MINUTES,
+            "chu_ky_ghi_am_phut": DEFAULT_INTERVAL_MINUTES,
             "chu_ky_quet_wifi_phut": DEFAULT_WIFI_RETRY_MINUTES,
             "ssid_upload": UPLOAD_TARGET_SSID,
             "wifi_password": WIFI_PASSWORD,
@@ -150,6 +169,9 @@ def build_default_identity_config() -> dict:
             "mic_i2s_rate": int(ARECORD_RATE),
             "mic_i2s_format": ARECORD_FORMAT,
             "duong_dan_public_key": "public.key",
+            "vad_nguong_dbfs": VAD_DEFAULT_THRESHOLD_DBFS,
+            "vad_timeout_im_lang_giay": VAD_DEFAULT_SILENCE_TIMEOUT_SEC,
+            "vad_max_thoi_gian_giay": VAD_DEFAULT_MAX_DURATION_SEC,
         },
         "updated_at": now_iso_local(),
     }
@@ -175,6 +197,11 @@ def validate_identity_config(config: dict) -> tuple[bool, str]:
             return False, f"missing dinh_danh.{key}"
         if not isinstance(dinh_danh[key], typ):
             return False, f"invalid type dinh_danh.{key}"
+
+    for opt_key in ("ten_thiet_bi", "id_thiet_bi", "dia_chi_thiet_bi"):
+        val = dinh_danh.get(opt_key)
+        if val is not None and not isinstance(val, str):
+            return False, f"invalid type dinh_danh.{opt_key}"
 
     cau_hinh = config.get("cau_hinh_ghi_am")
     if not isinstance(cau_hinh, dict):
@@ -250,7 +277,7 @@ def ensure_identity_config_exists() -> bool:
 
 def load_identity_config_from_disk(path: pathlib.Path = PI_IDENTITY_CONFIG_PATH) -> Optional[dict]:
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8-sig")
         cfg = json.loads(raw)
     except Exception as e:
         log(f"[CONFIG] FAIL read/parse {path}: {e}")
@@ -281,6 +308,9 @@ def normalize_record_mode(mode: object) -> str:
 
 def record_duration_from_mode(mode: str) -> Optional[int]:
     if mode == "manual":
+        return None
+
+    if mode == "vad":
         return None
 
     if mode == "continuous":
@@ -336,7 +366,7 @@ def resolve_public_key_path(path_text: str) -> pathlib.Path:
         p = pathlib.Path.home() / p
     return p
 
-def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str, str, str, str, str, str, str, bool]:
+def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str, str, str, str, str, str, str, bool, float, int, int, int]:
     cau_hinh = config.get("cau_hinh_ghi_am", {}) if isinstance(config, dict) else {}
 
     mode = normalize_record_mode(cau_hinh.get("kieu_ghi_am"))
@@ -347,6 +377,13 @@ def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str,
         default_value=DEFAULT_RECORD_MINUTES,
         min_value=1,
         max_value=MAX_RECORD_MINUTES,
+    )
+
+    interval_cycle_minutes = parse_positive_int(
+        cau_hinh.get("chu_ky_ghi_am_phut", DEFAULT_INTERVAL_MINUTES),
+        default_value=DEFAULT_INTERVAL_MINUTES,
+        min_value=1,
+        max_value=MAX_WIFI_RETRY_MINUTES,
     )
 
     wifi_retry_minutes = parse_positive_int(
@@ -411,14 +448,37 @@ def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str,
         default_value=DEFAULT_PREFER_HIDDEN_WIFI_IMMEDIATE,
     )
 
-    if mode == "manual":
+    # VAD params
+    raw_vad_threshold = cau_hinh.get("vad_nguong_dbfs", VAD_DEFAULT_THRESHOLD_DBFS)
+    try:
+        vad_threshold = float(raw_vad_threshold)
+        if vad_threshold > 0:
+            vad_threshold = VAD_DEFAULT_THRESHOLD_DBFS
+    except (TypeError, ValueError):
+        vad_threshold = VAD_DEFAULT_THRESHOLD_DBFS
+
+    vad_silence_timeout = parse_positive_int(
+        cau_hinh.get("vad_timeout_im_lang_giay", VAD_DEFAULT_SILENCE_TIMEOUT_SEC),
+        default_value=VAD_DEFAULT_SILENCE_TIMEOUT_SEC,
+        min_value=5,
+        max_value=600,
+    )
+
+    vad_max_duration = parse_positive_int(
+        cau_hinh.get("vad_max_thoi_gian_giay", VAD_DEFAULT_MAX_DURATION_SEC),
+        default_value=VAD_DEFAULT_MAX_DURATION_SEC,
+        min_value=30,
+        max_value=3600,
+    )
+
+    if mode in ("manual", "vad"):
         duration_sec = None
     elif mode.startswith("fixed_"):
         duration_sec = mode_duration_sec
     else:
         duration_sec = record_minutes * 60
 
-    return mode, duration_sec, wifi_retry_minutes * 60, runtime_ssid, runtime_wifi_password, runtime_arecord_device, runtime_arecord_channels, runtime_arecord_rate, runtime_arecord_format, runtime_public_key_path, runtime_prefer_hidden_wifi_immediate
+    return mode, duration_sec, wifi_retry_minutes * 60, runtime_ssid, runtime_wifi_password, runtime_arecord_device, runtime_arecord_channels, runtime_arecord_rate, runtime_arecord_format, runtime_public_key_path, runtime_prefer_hidden_wifi_immediate, vad_threshold, vad_silence_timeout, vad_max_duration, interval_cycle_minutes * 60
 
 def delete_file_safely(path: pathlib.Path, reason: str = "", allowed_suffixes: tuple[str, ...] = ()) -> None:
     try:
@@ -467,7 +527,8 @@ def cleanup_leftover_temp_audio_on_startup() -> None:
 
 
 def next_wav_path() -> pathlib.Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    corrected = datetime.now() + timedelta(seconds=_time_offset_sec)
+    ts = corrected.strftime("%Y%m%d_%H%M%S")
     base = REC_DIR / f"rec2_{ts}.wav"
     if not base.exists():
         return base
@@ -778,6 +839,17 @@ def wifi_manager_worker() -> None:
     def _try_connect_upload() -> bool:
         if not ensure_hidden_wifi_profile():
             return False
+        # Ngat WiFi hien tai neu dang ket noi WiFi khac (khong phai phantom)
+        cur_con = current_nm_connection()
+        if cur_con and cur_con not in (WIFI_CONNECTION_PROFILE, MGMT_WIFI_CONNECTION_PROFILE):
+            log(f"[WIFI] disconnect current WiFi before switching: {cur_con}")
+            with _wifi_nmcli_lock:
+                _run_cmd_logged(
+                    ["nmcli", "connection", "down", cur_con],
+                    timeout_sec=10,
+                    mask_password=False,
+                )
+            time.sleep(1)
         cmd = [
             "nmcli", "-w", str(WIFI_CONNECT_FAST_TIMEOUT_SEC),
             "connection", "up", WIFI_CONNECTION_PROFILE,
@@ -822,7 +894,7 @@ def wifi_manager_worker() -> None:
                 if not upload_triggered:
                     upload_triggered = True
                     log("[WIFI-MGR] connected upload WiFi, trigger upload now")
-                    upload_all_rec_bins()
+                    upload_all_rec_bins(force=True)
                 time.sleep(IMMEDIATE_HIDDEN_WIFI_CHECK_SEC)
 
             elif on_mgmt:
@@ -1029,12 +1101,172 @@ def record_wav_segment(wav_path: pathlib.Path, duration_sec: int) -> bool:
     return True
 
 
+def _calc_rms_dbfs_from_raw(data: bytes, channels: int, fmt: str) -> Optional[float]:
+    """Tinh dBFS tu raw PCM bytes (khong co WAV header)."""
+    fmt_upper = fmt.upper()
+    if fmt_upper in ("S16_LE", "S16_BE"):
+        bytes_per_sample, max_val = 2, 32768.0
+        pack_char, endian = "h", "<" if fmt_upper == "S16_LE" else ">"
+    elif fmt_upper in ("S32_LE", "S32_BE", "S24_LE", "S24_BE"):
+        bytes_per_sample, max_val = 4, 2147483648.0
+        pack_char, endian = "i", "<" if "LE" in fmt_upper else ">"
+    else:
+        return None
+
+    count = len(data) // bytes_per_sample
+    if count == 0:
+        return None
+
+    samples = struct.unpack(f"{endian}{count}{pack_char}", data[:count * bytes_per_sample])
+    rms = math.sqrt(sum(s * s for s in samples) / count)
+    if rms == 0:
+        return -96.0
+    return 20.0 * math.log10(rms / max_val)
+
+
+def record_wav_segment_vad(wav_path_factory) -> Optional[pathlib.Path]:
+    """
+    2-phase VAD:
+    Phase 1 – Nghe (khong ghi file): arecord -t raw | doc PCM chunk, tinh dBFS.
+              Khi dBFS >= threshold -> sang Phase 2.
+    Phase 2 – Ghi file that: arecord -d max_duration output.wav.
+              - Im lang lien tuc >= silence_timeout -> kill -> luu
+              - Het max_duration -> arecord tu dung -> luu
+    Tra ve path file WAV neu thanh cong, None neu that bai/khong co tieng.
+    """
+    threshold = _runtime_vad_threshold_dbfs
+    silence_timeout = _runtime_vad_silence_timeout_sec
+    max_duration = _runtime_vad_max_duration_sec
+    monitor_interval = VAD_DEFAULT_MONITOR_INTERVAL_SEC
+    ch = int(_runtime_arecord_channels)
+    rate = int(_runtime_arecord_rate)
+    fmt = _runtime_arecord_format
+    # chunk = ~0.3s PCM data de tinh dBFS nhanh
+    bytes_per_sample = 4 if fmt.upper() in ("S32_LE", "S32_BE", "S24_LE", "S24_BE") else 2
+    chunk_frames = int(rate * 0.3)
+    chunk_bytes = chunk_frames * ch * bytes_per_sample
+
+    # ── Phase 1: Nghe, khong ghi file ────────────────────────────────────────
+    log(f"[VAD] phase1 listening threshold={threshold}dBFS ...")
+    listen_cmd = [
+        "arecord",
+        "-D", _runtime_arecord_device,
+        "-c", _runtime_arecord_channels,
+        "-r", _runtime_arecord_rate,
+        "-f", _runtime_arecord_format,
+        "-t", "raw",
+    ]
+
+    try:
+        listen_proc = subprocess.Popen(listen_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log(f"[VAD] Exception start listen: {e}")
+        return None
+
+    triggered = False
+    try:
+        while True:
+            chunk = listen_proc.stdout.read(chunk_bytes)
+            if not chunk:
+                break
+            db = _calc_rms_dbfs_from_raw(chunk, ch, fmt)
+            if db is not None and db >= threshold:
+                log(f"[VAD] audio detected dBFS={db:.1f} -> start recording")
+                triggered = True
+                break
+    finally:
+        listen_proc.kill()
+        try:
+            listen_proc.stdout.close()
+        except Exception:
+            pass
+        listen_proc.wait()
+
+    if not triggered:
+        return None
+
+    # ── Phase 2: Ghi file that ────────────────────────────────────────────────
+    wav_path = wav_path_factory()
+    log(f"[VAD] phase2 recording file={wav_path.name} silence={silence_timeout}s max={max_duration}s")
+    t0 = time.time()
+
+    rec_cmd = [
+        "arecord",
+        "-D", _runtime_arecord_device,
+        "-c", _runtime_arecord_channels,
+        "-r", _runtime_arecord_rate,
+        "-f", _runtime_arecord_format,
+        "-d", str(max_duration),
+        "-t", "wav",
+        str(wav_path),
+    ]
+
+    try:
+        rec_proc = subprocess.Popen(rec_cmd)
+    except Exception as e:
+        log(f"[VAD] Exception start rec: {e}")
+        return None
+
+    kill_flag = threading.Event()
+    stop_event = threading.Event()
+    silence_since: list[Optional[float]] = [None]
+
+    def _silence_monitor() -> None:
+        while not stop_event.wait(float(monitor_interval)):
+            db = _rms_dbfs_from_wav_tail(wav_path, rate, ch, fmt)
+            if db is None:
+                continue
+            elapsed = int(time.time() - t0)
+            if db >= threshold:
+                silence_since[0] = None
+                log(f"[VAD] rec t={elapsed}s dBFS={db:.1f} active")
+            else:
+                if silence_since[0] is None:
+                    silence_since[0] = time.monotonic()
+                    log(f"[VAD] rec t={elapsed}s dBFS={db:.1f} silence started")
+                else:
+                    silent_for = time.monotonic() - silence_since[0]
+                    log(f"[VAD] rec t={elapsed}s dBFS={db:.1f} silent={silent_for:.0f}s/{silence_timeout}s")
+                    if silent_for >= silence_timeout:
+                        log("[VAD] silence timeout -> stop")
+                        kill_flag.set()
+                        return
+
+    monitor = threading.Thread(target=_silence_monitor, daemon=True, name="vad-silence-monitor")
+    monitor.start()
+
+    while rec_proc.poll() is None:
+        if kill_flag.is_set():
+            rec_proc.kill()
+            rec_proc.wait()
+            break
+        time.sleep(0.5)
+
+    stop_event.set()
+    monitor.join(timeout=monitor_interval + 2)
+
+    elapsed_ms = int((time.time() - t0) * 1000)
+    rc = rec_proc.returncode
+
+    if rc not in (0, -9, None):
+        log(f"[VAD] arecord failed rc={rc} ms={elapsed_ms}")
+        delete_wav_safely(wav_path, reason="vad_arecord_fail")
+        return None
+
+    if not wav_path.exists() or wav_path.stat().st_size <= 44:
+        log(f"[VAD] empty wav: {wav_path.name}")
+        delete_wav_safely(wav_path, reason="vad_empty_wav")
+        return None
+
+    log(f"[VAD] OK file={wav_path.name} size={wav_path.stat().st_size} ms={elapsed_ms}")
+    return wav_path
+
+
 def compress_wav_to_opus(wav_path: pathlib.Path, opus_path: pathlib.Path, delete_wav: bool = True) -> bool:
     if not wav_path.exists():
         log(f"[OPUS] FAIL missing wav: {wav_path.name}")
         return False
 
-    # ffmpeg c WAV arecord v ghi Opus/Ogg. -y cho php ghi  nu file tm cn st.
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -1275,7 +1507,7 @@ def upload_file_to_http_api(local_path: pathlib.Path) -> bool:
         return False
 
 
-def upload_all_rec_bins() -> bool:
+def upload_all_rec_bins(force: bool = False) -> bool:
     global _last_upload_try_monotonic, _runtime_wifi_retry_interval_sec
 
     # Kiem tra file .bin truoc khi connect WiFi.
@@ -1286,7 +1518,7 @@ def upload_all_rec_bins() -> bool:
         return True
 
     now_mono = time.monotonic()
-    if _last_upload_try_monotonic > 0:
+    if not force and _last_upload_try_monotonic > 0:
         elapsed = now_mono - _last_upload_try_monotonic
         if elapsed < _runtime_wifi_retry_interval_sec:
             wait_left = int(_runtime_wifi_retry_interval_sec - elapsed)
@@ -1579,6 +1811,9 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
                         "nam_sinh": dinh_danh.get("nam_sinh", 0),
                         "dia_chi": dinh_danh.get("dia_chi", ""),
                         "ngay_cap_dinh_danh": dinh_danh.get("ngay_cap_dinh_danh", ""),
+                        "ten_thiet_bi": dinh_danh.get("ten_thiet_bi", ""),
+                        "id_thiet_bi": dinh_danh.get("id_thiet_bi", ""),
+                        "dia_chi_thiet_bi": dinh_danh.get("dia_chi_thiet_bi", ""),
                     },
                     "cau_hinh_ghi_am": {
                         "kieu_ghi_am": cau_hinh.get("kieu_ghi_am", DEFAULT_RECORD_MODE),
@@ -1587,10 +1822,14 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
                         "ssid_upload": cau_hinh.get("ssid_upload", UPLOAD_TARGET_SSID),
                         "wifi_password": cau_hinh.get("wifi_password", WIFI_PASSWORD),
                         "duong_dan_public_key": cau_hinh.get("duong_dan_public_key", "public.key"),
+                        "vad_nguong_dbfs": cau_hinh.get("vad_nguong_dbfs", VAD_DEFAULT_THRESHOLD_DBFS),
+                        "vad_timeout_im_lang_giay": cau_hinh.get("vad_timeout_im_lang_giay", VAD_DEFAULT_SILENCE_TIMEOUT_SEC),
+                        "vad_max_thoi_gian_giay": cau_hinh.get("vad_max_thoi_gian_giay", VAD_DEFAULT_MAX_DURATION_SEC),
                     },
                 },
                 "updated_at": cfg.get("updated_at", "") if isinstance(cfg, dict) else "",
                 "config_path": str(PI_IDENTITY_CONFIG_PATH),
+                "mac_address": get_wlan_mac(),
             })
             return
 
@@ -1619,6 +1858,25 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
             self.end_headers()
             with target.open("rb") as f:
                 shutil.copyfileobj(f, self.wfile)
+            return
+
+        if path == "/api/download-all":
+            bins = sorted(REC_DIR.glob("*.bin"))
+            if not bins:
+                self._send_json(404, {"ok": False, "error": "no files"})
+                return
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in bins:
+                    zf.write(p, p.name)
+            zip_bytes = buf.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="recordings.zip"')
+            self.send_header("Content-Length", str(len(zip_bytes)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(zip_bytes)
             return
 
         self._send_json(404, {"ok": False, "error": "not_found"})
@@ -1719,6 +1977,35 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})
             return
+        if path == "/api/download-selected":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(content_length)
+                body = json.loads(raw_body.decode("utf-8"))
+                names = body.get("names", [])
+                if not names or not isinstance(names, list):
+                    self._send_json(400, {"ok": False, "error": "missing or invalid 'names'"})
+                    return
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for name in names:
+                        target = (REC_DIR / os.path.basename(name)).resolve()
+                        if not str(target).startswith(str(REC_DIR.resolve())):
+                            continue
+                        if target.exists() and target.is_file():
+                            zf.write(target, target.name)
+                zip_bytes = buf.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", 'attachment; filename="selected.zip"')
+                self.send_header("Content-Length", str(len(zip_bytes)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(zip_bytes)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": str(e)})
+            return
+
         if path == "/api/upload":
             content_type = self.headers.get("Content-Type", "")
             if "multipart/form-data" not in content_type:
@@ -1838,8 +2125,20 @@ REGISTRY_API_PORT = 8766
 DEVICE_CONNECTION_API_PORT = 8765
 
 
-def get_wlan_ip() -> str:
-    """Lay IP thuc cua wlan0, fallback ve 192.168.137.2 neu khong lay duoc."""
+def get_wlan_mac() -> str:
+    """Lay MAC address cua wlan0."""
+    try:
+        out = subprocess.check_output(
+            ["cat", f"/sys/class/net/{WIFI_IFACE}/address"],
+            text=True, timeout=3,
+        ).strip()
+        return out or ""
+    except Exception:
+        return ""
+
+
+def get_wlan_ip() -> Optional[str]:
+    """Lay IP thuc cua wlan0."""
     try:
         out = subprocess.check_output(
             ["ip", "-4", "addr", "show", WIFI_IFACE],
@@ -1848,16 +2147,50 @@ def get_wlan_ip() -> str:
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("inet "):
-                return line.split()[1].split("/")[0]
+                ip = line.split()[1].split("/")[0]
+                log(f"[MGMT] wlan0 IP: {ip}")
+                return ip
     except Exception:
         pass
-    return "192.168.137.2"
+    log("[MGMT] wlan0 IP: not found")
+    return None
+
+
+def sync_time_from_pc() -> None:
+    """Lay thoi gian tu PC, tinh offset de ten file ghi am dung gio thuc.
+    Chi dung offset neu PC time > Pi time (Pi dang chay cham hon thuc te).
+    """
+    global _time_offset_sec
+    try:
+        url = f"http://{REGISTRY_API_HOST}:{DEVICE_CONNECTION_API_PORT}/api/time"
+        resp = requests.get(url, timeout=3)
+        if resp.status_code != 200:
+            log(f"[TIME] sync failed: status={resp.status_code}")
+            return
+        data = resp.json()
+        unix_ms = data.get("unix_ms")
+        iso_time = data.get("iso")
+        if unix_ms is None or not iso_time:
+            log("[TIME] sync failed: missing unix_ms or iso field")
+            return
+        pc_time = unix_ms / 1000.0
+        local_time = datetime.now().timestamp()
+        offset = pc_time - local_time
+        # Chi dung offset khi PC time > Pi time; neu Pi dang nhanh hon thi giu nguyen
+        _time_offset_sec = max(0.0, offset)
+        log(f"[TIME] offset={_time_offset_sec:.1f}s pc={iso_time} (raw_offset={offset:.1f}s)")
+    except Exception as e:
+        log(f"[TIME] sync failed: {e}")
 
 
 def notify_device_connection() -> None:
     """Ban su kien ket noi toi WiFi ...0001 cho may phat WiFi."""
+    sync_time_from_pc()
     try:
         ip = get_wlan_ip()
+        if ip is None:
+            log("[MGMT] notify device connection: skip, no IP yet")
+            return
         url = f"http://{REGISTRY_API_HOST}:{DEVICE_CONNECTION_API_PORT}/api/device/connection"
         requests.post(url, json={"ip": ip, "type": "A"}, timeout=3)
         log(f"[MGMT] notify device connection: ip={ip}")
@@ -1869,6 +2202,8 @@ def main() -> None:
     global _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password
     global _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path
     global _runtime_prefer_hidden_wifi_immediate
+    global _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec
+    global _runtime_interval_cycle_sec
 
     ensure_dirs()
 
@@ -1877,7 +2212,7 @@ def main() -> None:
         log("[CONFIG] WARNING: could not create default config file")
 
     active_config = load_identity_config_from_disk() or build_default_identity_config()
-    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate = derive_runtime_settings(active_config)
+    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec = derive_runtime_settings(active_config)
 
     last_config_mtime = None
     if PI_IDENTITY_CONFIG_PATH.exists():
@@ -1914,9 +2249,10 @@ def main() -> None:
     log(f"[PI2W] audio: device={_runtime_arecord_device} ch={_runtime_arecord_channels} rate={_runtime_arecord_rate} fmt={_runtime_arecord_format} -> Opus {OPUS_BITRATE} gain=+{AUDIO_GAIN_DB}dB")
     log(f"[PI2W] public key path: {_runtime_public_key_path}")
     log(
-        f"[PI2W] mode={active_mode} record_every={active_duration_sec if active_duration_sec is not None else 'manual'}s "
+        f"[PI2W] mode={active_mode} record_every={active_duration_sec if active_duration_sec is not None else 'vad/manual'}s "
         f"wifi_retry_every={_runtime_wifi_retry_interval_sec}s ssid={_runtime_upload_target_ssid} profile={WIFI_CONNECTION_PROFILE} "
-        f"disconnect_after_success={DISCONNECT_WIFI_AFTER_SUCCESS_UPLOAD} immediate_hidden_prefer={_runtime_prefer_hidden_wifi_immediate}"
+        f"disconnect_after_success={DISCONNECT_WIFI_AFTER_SUCCESS_UPLOAD} immediate_hidden_prefer={_runtime_prefer_hidden_wifi_immediate} "
+        f"vad_threshold={_runtime_vad_threshold_dbfs}dBFS vad_silence={_runtime_vad_silence_timeout_sec}s vad_max={_runtime_vad_max_duration_sec}s"
     )
 
     while True:
@@ -1938,7 +2274,7 @@ def main() -> None:
                     prev_immediate = _runtime_prefer_hidden_wifi_immediate
 
                     active_config = cfg
-                    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate = derive_runtime_settings(active_config)
+                    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec = derive_runtime_settings(active_config)
                     last_config_mtime = current_mtime
 
                     log(
@@ -1954,13 +2290,33 @@ def main() -> None:
                 else:
                     log("[CONFIG] invalid config detected; keep last valid config")
 
-        if active_duration_sec is None:
+        if active_duration_sec is None and active_mode != "vad":
             log("[MAIN] mode=manual, sleep 2s and wait config change")
             time.sleep(2)
             continue
 
-        wav_path = next_wav_path()
-        rec_ok = record_wav_segment(wav_path, active_duration_sec)
+        if active_mode == "vad":
+            wav_path = record_wav_segment_vad(next_wav_path)
+            rec_ok = wav_path is not None
+        elif active_mode == "interval":
+            wav_path = next_wav_path()
+            rec_ok = record_wav_segment(wav_path, active_duration_sec)
+            if rec_ok:
+                job_queue.put(wav_path)
+                qsize = job_queue.qsize()
+                log(f"[MAIN] queued for background processing: {wav_path.name} queue={qsize} mode=interval cycle={_runtime_interval_cycle_sec}s")
+                if qsize >= 5:
+                    log(f"[WARN] processing queue backlog={qsize}; WiFi/CPU may be slower than recording")
+            else:
+                log("[MAIN] Record failed, wav cleanup already handled; continue recording")
+            wait_sec = max(0, _runtime_interval_cycle_sec - active_duration_sec)
+            if wait_sec > 0:
+                log(f"[MAIN] interval mode: wait {wait_sec}s before next recording")
+                time.sleep(wait_sec)
+            continue
+        else:
+            wav_path = next_wav_path()
+            rec_ok = record_wav_segment(wav_path, active_duration_sec)
 
         if rec_ok:
             job_queue.put(wav_path)

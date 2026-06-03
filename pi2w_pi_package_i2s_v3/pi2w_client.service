@@ -5,12 +5,27 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pizero21
-WorkingDirectory=/home/pizero21/pi2w
-ExecStart=/home/pizero21/pi2w/.venv/bin/python /home/pizero21/pi2w/pi2w_client.py
+User=pizero23
+WorkingDirectory=/home/pizero23/pi2w
+ExecStart=/home/pizero23/pi2w/.venv/bin/python /home/pizero23/pi2w/pi2w_client.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Description=PI2W Audio Client (I2S)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pizero23
+WorkingDirectory=/home/pizero21/pi2w
+ExecStart=/home/pizero23/pi2w/.venv/bin/python /home/pizero23/pi2w/pi2w_client.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
 
 [Install]
 WantedBy=multi-user.target

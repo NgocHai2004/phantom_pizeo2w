@@ -1,11 +1,12 @@
-# HUONG DAN CAI DAT PI2W CLIENT (PI ZERO 2 W)
+﻿# HUONG DAN CAI DAT PI2W CLIENT (PI ZERO 2 W)
 
 ## Dieu kien can
 - Raspberry Pi Zero 2 W
 - OS: Raspberry Pi OS
 - File `pi2w_pi_package_i2s_v3.zip` da co trong home
 - Co quyen sudo
-
+sudo apt update
+sudo apt install -y unzip sed bash
 ---
 
 ## Buoc 1: Giai nen package
@@ -86,14 +87,14 @@ sudo usermod -aG netdev "$USER"
 ```
 
 ```bash
-sudo bash -c 'cat > /etc/polkit-1/rules.d/50-nmcli-user.rules <<EOF
+sudo tee /etc/polkit-1/rules.d/50-nmcli.rules > /dev/null << 'EOF'
 polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
-        subject.user === "pizero21") {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 &&
+        subject.user == "pizero23") {
         return polkit.Result.YES;
     }
 });
-EOF'
+EOF
 ```
 
 > Thay `pizero21` bang ten user thuc te.

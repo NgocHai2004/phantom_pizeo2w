@@ -4,7 +4,10 @@
     "ho_ten": "Nguyen Van A",
     "nam_sinh": 1990,
     "dia_chi": "Ha Noi",
-    "ngay_cap_dinh_danh": "2026-05-30"
+    "ngay_cap_dinh_danh": "2026-05-30",
+    "ten_thiet_bi": "Pi Zero 2W",
+    "id_thiet_bi": "DEVICE-0001",
+    "dia_chi_thiet_bi": "Ha Noi"
   },
   "cau_hinh_ghi_am": {
     "kieu_ghi_am": "continuous",
@@ -14,7 +17,7 @@
     "wifi_password": "12345678",
     "uu_tien_wifi_an_lap_tuc": true,
     "mic_loai": "i2s",
-    "mic_i2s_device": "hw:1,0",
+    "mic_i2s_device": "hw:0,0",
     "mic_i2s_channels": 2,
     "mic_i2s_rate": 44100,
     "mic_i2s_format": "S32_LE",

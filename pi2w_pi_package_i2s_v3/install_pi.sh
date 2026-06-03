@@ -129,8 +129,8 @@ else
   echo "[WARN] No WiFi interface found"
 fi
 
-SSID="$(python3 -c 'import json; from pathlib import Path; p=Path("'"$CFG_PATH"'"); c=json.loads(p.read_text(encoding="utf-8")); print(c.get("cau_hinh_ghi_am",{}).get("ssid_upload",""))')"
-PASS="$(python3 -c 'import json; from pathlib import Path; p=Path("'"$CFG_PATH"'"); c=json.loads(p.read_text(encoding="utf-8")); print(c.get("cau_hinh_ghi_am",{}).get("wifi_password",""))')"
+SSID="$(python3 -c 'import json; from pathlib import Path; p=Path("'"$CFG_PATH"'"); c=json.loads(p.read_text(encoding="utf-8-sig")); print(c.get("cau_hinh_ghi_am",{}).get("ssid_upload",""))')"
+PASS="$(python3 -c 'import json; from pathlib import Path; p=Path("'"$CFG_PATH"'"); c=json.loads(p.read_text(encoding="utf-8-sig")); print(c.get("cau_hinh_ghi_am",{}).get("wifi_password",""))')"
 
 if [ -n "${WIFI_IFACE:-}" ] && [ -n "$SSID" ]; then
   echo "[INFO] Creating hidden WiFi connection: phantom_hidden"
@@ -151,7 +151,7 @@ if [ -n "${WIFI_IFACE:-}" ] && [ -n "$SSID" ]; then
   run_root nmcli con mod phantom_hidden connection.autoconnect yes
   run_root nmcli con mod phantom_hidden connection.autoconnect-priority 999
   run_root nmcli con mod phantom_hidden connection.autoconnect-retries -1
-  run_root nmcli con mod phantom_hidden ipv4.method manual ipv4.addresses 10.42.0.2/24 ipv4.gateway 10.42.0.1
+  run_root nmcli con mod phantom_hidden ipv4.method auto ipv4.addresses "" ipv4.gateway ""
 
   echo "[INFO] phantom_hidden created successfully"
 else
@@ -172,7 +172,7 @@ if [ -n "${WIFI_IFACE:-}" ]; then
   run_root nmcli con mod phantom_mgmt connection.autoconnect yes
   run_root nmcli con mod phantom_mgmt connection.autoconnect-priority 998
   run_root nmcli con mod phantom_mgmt connection.autoconnect-retries -1
-  run_root nmcli con mod phantom_mgmt ipv4.method manual ipv4.addresses 10.42.0.2/24 ipv4.gateway 10.42.0.1
+  run_root nmcli con mod phantom_mgmt ipv4.method auto ipv4.addresses "" ipv4.gateway ""
 
   echo "[INFO] phantom_mgmt created successfully"
 else
