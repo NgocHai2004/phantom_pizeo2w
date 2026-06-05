@@ -1198,9 +1198,8 @@ def record_wav_segment_vad(wav_path_factory) -> Optional[pathlib.Path]:
     ch = int(_runtime_arecord_channels)
     rate = int(_runtime_arecord_rate)
     fmt = _runtime_arecord_format
-    # chunk = ~0.3s PCM data de tinh dBFS nhanh
     bytes_per_sample = 4 if fmt.upper() in ("S32_LE", "S32_BE", "S24_LE", "S24_BE") else 2
-    chunk_frames = int(rate * 0.3)
+    chunk_frames = int(rate * 2)
     chunk_bytes = chunk_frames * ch * bytes_per_sample
 
     # ── Phase 1: Nghe, khong ghi file ────────────────────────────────────────
