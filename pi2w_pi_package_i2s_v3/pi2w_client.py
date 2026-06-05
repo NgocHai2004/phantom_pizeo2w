@@ -60,7 +60,7 @@ REC_DIR = pathlib.Path.home() / "rec"
 PI_IDENTITY_CONFIG_PATH = REC_DIR / "pi_identity_config.json"
 PI_IDENTITY_CONFIG_TMP_PATH = REC_DIR / "pi_identity_config.tmp"
 
-SUPPORTED_RECORD_MODES = {"fixed_60s", "continuous", "manual", "vad", "interval"}
+SUPPORTED_RECORD_MODES = {"fixed_60s", "continuous", "manual", "vad", "interval", "scheduled"}
 DEFAULT_RECORD_MODE = "fixed_60s"
 AUTO_RECORD_SEC = 60
 DEFAULT_RECORD_MINUTES = 1
@@ -120,6 +120,8 @@ _runtime_vad_silence_timeout_sec = VAD_DEFAULT_SILENCE_TIMEOUT_SEC
 _runtime_vad_max_duration_sec = VAD_DEFAULT_MAX_DURATION_SEC
 _runtime_vad_monitor_interval_sec = VAD_DEFAULT_MONITOR_INTERVAL_SEC
 _runtime_interval_cycle_sec: int = DEFAULT_INTERVAL_MINUTES * 60  # chu ky giua 2 lan ghi (interval mode)
+_runtime_scheduled_start: Optional[str] = None  # "YYYY-MM-DD HH:MM", None = chua cau hinh
+_runtime_scheduled_end: Optional[str] = None    # "YYYY-MM-DD HH:MM", None = ghi den khi tat
 _wifi_nmcli_lock = threading.Lock()
 
 # Event de bao wifi_manager_worker rescan ngay sau khi upload xong va ngat ket noi
@@ -172,6 +174,8 @@ def build_default_identity_config() -> dict:
             "vad_nguong_dbfs": VAD_DEFAULT_THRESHOLD_DBFS,
             "vad_timeout_im_lang_giay": VAD_DEFAULT_SILENCE_TIMEOUT_SEC,
             "vad_max_thoi_gian_giay": VAD_DEFAULT_MAX_DURATION_SEC,
+            "bat_dau_ghi_am": None,
+            "ket_thuc_ghi_am": None,
         },
         "updated_at": now_iso_local(),
     }
@@ -246,6 +250,16 @@ def validate_identity_config(config: dict) -> tuple[bool, str]:
     duong_dan_public_key = cau_hinh.get("duong_dan_public_key")
     if duong_dan_public_key is not None and not isinstance(duong_dan_public_key, str):
         return False, "invalid cau_hinh_ghi_am.duong_dan_public_key"
+
+    for dt_field in ("bat_dau_ghi_am", "ket_thuc_ghi_am"):
+        val = cau_hinh.get(dt_field)
+        if val is not None:
+            if not isinstance(val, str):
+                return False, f"invalid cau_hinh_ghi_am.{dt_field} (expected 'YYYY-MM-DD HH:MM' or null)"
+            try:
+                datetime.strptime(val.strip(), "%Y-%m-%d %H:%M")
+            except ValueError:
+                return False, f"invalid cau_hinh_ghi_am.{dt_field} (expected 'YYYY-MM-DD HH:MM')"
 
     if "updated_at" in config and not isinstance(config["updated_at"], str):
         return False, "invalid updated_at"
@@ -325,6 +339,26 @@ def record_duration_from_mode(mode: str) -> Optional[int]:
     return AUTO_RECORD_SEC
 
 
+def parse_positive_float(value: object, default_value: float, min_value: float, max_value: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return default_value
+    # Chi chap nhan 0.5 hoac so nguyen >= 1
+    if parsed == 0.5:
+        return 0.5
+    int_val = int(parsed)
+    if int_val >= 1 and float(int_val) == parsed:
+        parsed = float(int_val)
+    else:
+        return default_value
+    if parsed < min_value:
+        return min_value
+    if parsed > max_value:
+        return max_value
+    return parsed
+
+
 def parse_positive_int(value: object, default_value: int, min_value: int, max_value: int) -> int:
     try:
         parsed = int(value)
@@ -366,7 +400,7 @@ def resolve_public_key_path(path_text: str) -> pathlib.Path:
         p = pathlib.Path.home() / p
     return p
 
-def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str, str, str, str, str, str, str, bool, float, int, int, int]:
+def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str, str, str, str, str, str, str, bool, float, int, int, int, Optional[str], Optional[str]]:
     cau_hinh = config.get("cau_hinh_ghi_am", {}) if isinstance(config, dict) else {}
 
     mode = normalize_record_mode(cau_hinh.get("kieu_ghi_am"))
@@ -386,11 +420,11 @@ def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str,
         max_value=MAX_WIFI_RETRY_MINUTES,
     )
 
-    wifi_retry_minutes = parse_positive_int(
+    wifi_retry_minutes = parse_positive_float(
         cau_hinh.get("chu_ky_quet_wifi_phut", DEFAULT_WIFI_RETRY_MINUTES),
-        default_value=DEFAULT_WIFI_RETRY_MINUTES,
-        min_value=1,
-        max_value=MAX_WIFI_RETRY_MINUTES,
+        default_value=float(DEFAULT_WIFI_RETRY_MINUTES),
+        min_value=0.5,
+        max_value=float(MAX_WIFI_RETRY_MINUTES),
     )
 
     runtime_ssid = parse_text_field(
@@ -471,14 +505,27 @@ def derive_runtime_settings(config: dict) -> tuple[str, Optional[int], int, str,
         max_value=3600,
     )
 
-    if mode in ("manual", "vad"):
+    if mode in ("manual", "vad", "scheduled"):
         duration_sec = None
     elif mode.startswith("fixed_"):
         duration_sec = mode_duration_sec
     else:
         duration_sec = record_minutes * 60
 
-    return mode, duration_sec, wifi_retry_minutes * 60, runtime_ssid, runtime_wifi_password, runtime_arecord_device, runtime_arecord_channels, runtime_arecord_rate, runtime_arecord_format, runtime_public_key_path, runtime_prefer_hidden_wifi_immediate, vad_threshold, vad_silence_timeout, vad_max_duration, interval_cycle_minutes * 60
+    # Scheduled mode: parse bat_dau / ket_thuc ("YYYY-MM-DD HH:MM" hoac None)
+    def _parse_datetime_str(val: object) -> Optional[str]:
+        if val is None or not isinstance(val, str):
+            return None
+        try:
+            datetime.strptime(val.strip(), "%Y-%m-%d %H:%M")
+            return val.strip()
+        except ValueError:
+            return None
+
+    scheduled_start = _parse_datetime_str(cau_hinh.get("bat_dau_ghi_am"))
+    scheduled_end   = _parse_datetime_str(cau_hinh.get("ket_thuc_ghi_am"))
+
+    return mode, duration_sec, wifi_retry_minutes * 60, runtime_ssid, runtime_wifi_password, runtime_arecord_device, runtime_arecord_channels, runtime_arecord_rate, runtime_arecord_format, runtime_public_key_path, runtime_prefer_hidden_wifi_immediate, vad_threshold, vad_silence_timeout, vad_max_duration, interval_cycle_minutes * 60, scheduled_start, scheduled_end
 
 def delete_file_safely(path: pathlib.Path, reason: str = "", allowed_suffixes: tuple[str, ...] = ()) -> None:
     try:
@@ -878,6 +925,8 @@ def wifi_manager_worker() -> None:
     was_connected = False
     disconnected_at: float = 0.0
     upload_triggered = False  # Da trigger upload lan dau khi ket noi ...0002 chua
+    mgmt_notify_last: float = 0.0  # Thoi diem ban notify_device_connection lan cuoi
+    was_on_mgmt = False  # Track de phat hien vua ket noi moi vao ...0001
 
     while True:
         try:
@@ -902,10 +951,18 @@ def wifi_manager_worker() -> None:
                 was_connected = True
                 disconnected_at = 0.0
                 upload_triggered = False
+                now_mono = time.monotonic()
+                # Gui ngay khi vua ket noi moi, hoac theo chu_ky_quet_wifi_phut
+                just_connected = not was_on_mgmt
+                if just_connected or (now_mono - mgmt_notify_last >= _runtime_wifi_retry_interval_sec):
+                    mgmt_notify_last = now_mono
+                    notify_device_connection()
+                was_on_mgmt = True
                 time.sleep(IMMEDIATE_HIDDEN_WIFI_CHECK_SEC)
 
             else:
                 _stop_mgmt_if_needed()
+                was_on_mgmt = False
 
                 # Ghi nhan thoi diem mat ket noi
                 if was_connected:
@@ -1825,6 +1882,8 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
                         "vad_nguong_dbfs": cau_hinh.get("vad_nguong_dbfs", VAD_DEFAULT_THRESHOLD_DBFS),
                         "vad_timeout_im_lang_giay": cau_hinh.get("vad_timeout_im_lang_giay", VAD_DEFAULT_SILENCE_TIMEOUT_SEC),
                         "vad_max_thoi_gian_giay": cau_hinh.get("vad_max_thoi_gian_giay", VAD_DEFAULT_MAX_DURATION_SEC),
+                        "bat_dau_ghi_am": cau_hinh.get("bat_dau_ghi_am", None),
+                        "ket_thuc_ghi_am": cau_hinh.get("ket_thuc_ghi_am", None),
                     },
                 },
                 "updated_at": cfg.get("updated_at", "") if isinstance(cfg, dict) else "",
@@ -1858,6 +1917,8 @@ class _FileManagementHandler(BaseHTTPRequestHandler):
             self.end_headers()
             with target.open("rb") as f:
                 shutil.copyfileobj(f, self.wfile)
+            target.unlink(missing_ok=True)
+            log(f"[MGMT] download+delete: {target.name}")
             return
 
         if path == "/api/download-all":
@@ -2198,12 +2259,33 @@ def notify_device_connection() -> None:
         log(f"[MGMT] notify device connection failed: {e}")
 
 
+def _current_corrected_time() -> datetime:
+    return datetime.now() + timedelta(seconds=_time_offset_sec)
+
+
+def is_in_recording_window(start: str, end: Optional[str]) -> bool:
+    now = _current_corrected_time()
+    start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M")
+    if end is None:
+        return now >= start_dt
+    end_dt = datetime.strptime(end, "%Y-%m-%d %H:%M")
+    return start_dt <= now < end_dt
+
+
+def seconds_until_window_start(start: str) -> float:
+    now = _current_corrected_time()
+    start_dt = datetime.strptime(start, "%Y-%m-%d %H:%M")
+    delta = (start_dt - now).total_seconds()
+    return max(0.0, delta)
+
+
 def main() -> None:
     global _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password
     global _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path
     global _runtime_prefer_hidden_wifi_immediate
     global _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec
     global _runtime_interval_cycle_sec
+    global _runtime_scheduled_start, _runtime_scheduled_end
 
     ensure_dirs()
 
@@ -2212,7 +2294,7 @@ def main() -> None:
         log("[CONFIG] WARNING: could not create default config file")
 
     active_config = load_identity_config_from_disk() or build_default_identity_config()
-    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec = derive_runtime_settings(active_config)
+    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec, _runtime_scheduled_start, _runtime_scheduled_end = derive_runtime_settings(active_config)
 
     last_config_mtime = None
     if PI_IDENTITY_CONFIG_PATH.exists():
@@ -2274,7 +2356,7 @@ def main() -> None:
                     prev_immediate = _runtime_prefer_hidden_wifi_immediate
 
                     active_config = cfg
-                    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec = derive_runtime_settings(active_config)
+                    active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec, _runtime_scheduled_start, _runtime_scheduled_end = derive_runtime_settings(active_config)
                     last_config_mtime = current_mtime
 
                     log(
@@ -2290,12 +2372,26 @@ def main() -> None:
                 else:
                     log("[CONFIG] invalid config detected; keep last valid config")
 
-        if active_duration_sec is None and active_mode != "vad":
+        if active_duration_sec is None and active_mode not in ("vad", "scheduled"):
             log("[MAIN] mode=manual, sleep 2s and wait config change")
             time.sleep(2)
             continue
 
-        if active_mode == "vad":
+        if active_mode == "scheduled":
+            if _runtime_scheduled_start is None:
+                log("[MAIN] mode=scheduled, no window configured, sleep 2s")
+                time.sleep(2)
+                continue
+            if not is_in_recording_window(_runtime_scheduled_start, _runtime_scheduled_end):
+                wait_sec = seconds_until_window_start(_runtime_scheduled_start)
+                log(f"[MAIN] mode=scheduled, outside window, sleep {int(wait_sec)}s until {_runtime_scheduled_start}")
+                time.sleep(max(2.0, wait_sec))
+                continue
+            # Trong khung gio: ghi 1 segment binh thuong
+            seg_sec = int(active_duration_sec) if active_duration_sec else AUTO_RECORD_SEC
+            wav_path = next_wav_path()
+            rec_ok = record_wav_segment(wav_path, seg_sec)
+        elif active_mode == "vad":
             wav_path = record_wav_segment_vad(next_wav_path)
             rec_ok = wav_path is not None
         elif active_mode == "interval":

@@ -29,6 +29,14 @@ Co 2 che do chinh:
   - Dat toi da `vad_max_thoi_gian_giay` giay → luu file → quay ve Phase 1.
 - File sau khi ghi duoc xu ly: nen Opus → ma hoa → upload.
 
+### Che do 4: Ghi theo gio hoa PC (`scheduled`)
+- Ghi am lien tuc tung segment trong khung gio da dat, ngoai khung gio thi ngu de tiet kiem pin.
+- Thoi gian lay tu PC (dong bo qua WiFi MGMT khi ket noi).
+- Ho tro khung gio qua dem: vi du `22:00` → `06:00`.
+- Neu `gio_bat_dau_ghi_am = null`: khong ghi, cho config.
+- Neu `gio_ket_thuc_ghi_am = null`: ghi tu gio bat dau den khi tat thiet bi.
+- Dung field: `kieu_ghi_am = "scheduled"`, `thoi_luong_ghi_am_phut = <so phut>`, `gio_bat_dau_ghi_am = "HH:MM"`, `gio_ket_thuc_ghi_am = "HH:MM"`.
+
 ---
 
 ## 3) API 1 - Lay config hien tai
@@ -138,17 +146,30 @@ Co 2 che do chinh:
   }
 }
 ```
+### Vi du: scheduled qua dem (ghi tu 22:00 ngay 10/6 den 06:00 ngay 11/6)
+```json
+{
+  "cau_hinh_ghi_am": {
+    "kieu_ghi_am": "scheduled",
+    "thoi_luong_ghi_am_phut": 5,
+    "bat_dau_ghi_am": "2026-06-10 22:00",
+    "ket_thuc_ghi_am": "2026-06-11 06:00"
+  }
+}
+```
 ### Rang buoc cac field
 
 | Field | Kieu | Gia tri hop le | Mac dinh | Mo ta |
 |---|---|---|---|---|
-| `kieu_ghi_am` | string | `"continuous"`, `"vad"`, `"interval"` | `"continuous"` | Che do ghi am |
-| `thoi_luong_ghi_am_phut` | int | 1 – 120 | 1 | So phut moi file (dung khi `continuous` va `interval`) |
+| `kieu_ghi_am` | string | `"continuous"`, `"vad"`, `"interval"`, `"scheduled"` | `"continuous"` | Che do ghi am |
+| `thoi_luong_ghi_am_phut` | int | 1 – 120 | 1 | So phut moi file (dung khi `continuous`, `interval`, `scheduled`) |
 | `chu_ky_ghi_am_phut` | int | 1 – 1440 | 60 | Chu ky giua 2 lan ghi (phut, chi dung khi `interval`) |
-| `chu_ky_quet_wifi_phut` | int | 1 – 240 | 2 | Chu ky quet WiFi upload (phut) |
+| `chu_ky_quet_wifi_phut` | float | 0.5 hoac 1 – 240 | 2 | Chu ky quet WiFi upload (phut); 0.5 = 30 giay |
 | `vad_nguong_dbfs` | float | -96.0 – 0.0 | -41.0 | Nguong am thanh bat dau ghi (am to → gan 0) |
 | `vad_timeout_im_lang_giay` | int | 5 – 600 | 60 | Im lang lien tuc bao nhieu giay thi dung ghi |
 | `vad_max_thoi_gian_giay` | int | 30 – 3600 | 600 | Thoi gian ghi toi da 1 session (giay) |
+| `bat_dau_ghi_am` | string\|null | `"YYYY-MM-DD HH:MM"` hoac `null` | `null` | Thoi diem bat dau ghi (chi dung khi `scheduled`); null = chua cau hinh |
+| `ket_thuc_ghi_am` | string\|null | `"YYYY-MM-DD HH:MM"` hoac `null` | `null` | Thoi diem ket thuc ghi (chi dung khi `scheduled`); null = ghi den khi tat |
 | `ten_thiet_bi` | string | chuoi bat ky | `"Pi Zero 2W"` | Ten thiet bi |
 | `id_thiet_bi` | string | chuoi bat ky | `"DEVICE-0001"` | Ma dinh danh thiet bi |
 | `dia_chi_thiet_bi` | string | chuoi bat ky | `"Ha Noi"` | Dia chi thiet bi |
@@ -259,6 +280,21 @@ POST /api/config
 - Sau POST thanh cong, cho 3–5 giay de service restart.
 - Goi `GET /api/config` de kiem tra `kieu_ghi_am` da doi chua.
 
+#### Ghi theo gio hoa PC — ghi trong khung thoi gian da dat (`scheduled`)
+```json
+POST /api/config
+{
+  "cau_hinh_ghi_am": {
+    "kieu_ghi_am": "scheduled",
+    "thoi_luong_ghi_am_phut": 5,
+    "bat_dau_ghi_am": "2026-06-10 08:00",
+    "ket_thuc_ghi_am": "2026-06-10 17:00"
+  }
+}
+```
+> Pi ngu truoc thoi diem bat dau de tiet kiem pin, ghi lien tuc tung segment khi den gio, dung khi het gio.
+> Thoi gian dong bo tu PC khi ket noi WiFi MGMT.
+
 ### Bang chon nhanh
 
 | Muc tieu | Che do | Field chinh |
@@ -266,6 +302,7 @@ POST /api/config
 | Ghi lien tuc, file ngan | `continuous` | `thoi_luong_ghi_am_phut` |
 | Ghi dinh ky theo gio | `interval` | `thoi_luong_ghi_am_phut` + `chu_ky_ghi_am_phut` |
 | Chi ghi khi co nguoi noi | `vad` | `vad_nguong_dbfs` + `vad_timeout_im_lang_giay` |
+| Ghi trong khung thoi gian cu the | `scheduled` | `bat_dau_ghi_am` + `ket_thuc_ghi_am` |
 
 ---
 
