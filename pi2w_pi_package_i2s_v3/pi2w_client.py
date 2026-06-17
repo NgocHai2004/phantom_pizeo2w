@@ -20,6 +20,7 @@ import zipfile
 import io
 
 import requests
+import base64
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from cryptography.hazmat.primitives import hmac as _hmac, hashes as _hashes
 from cryptography.hazmat.backends import default_backend as _backend
@@ -41,6 +42,9 @@ WIFI_PASSWORD = "12345678"
 WIFI_CONNECTION_PROFILE = "phantom_hidden"
 MGMT_WIFI_CONNECTION_PROFILE = "phantom_mgmt"
 WIFI_IFACE = "wlan0"
+USB_IFACE = "usb0"
+USB_POLL_INTERVAL_SEC = 5
+SERIAL_DEV = "/dev/ttyGS0"   # CDC-ACM gadget khi cam day USB data
 WIFI_CONNECT_TIMEOUT_SEC = 20
 WIFI_CONNECT_FAST_TIMEOUT_SEC = 8
 WIFI_RETRY_INTERVAL_SEC = 120
@@ -105,6 +109,8 @@ PHTM_KEY_SIZE = 32
 PHTM_KEY_PATH = pathlib.Path.home() / "public.key"
 PHRAW1_MAGIC = b"PHRAW1"
 
+_usb_mgmt_active = False   # usb_manager_worker dang giu mgmt server
+_wifi_mgmt_active = False  # wifi_manager_worker dang giu mgmt server
 _last_upload_try_monotonic = 0.0
 _runtime_wifi_retry_interval_sec = WIFI_RETRY_INTERVAL_SEC
 _runtime_upload_target_ssid = UPLOAD_TARGET_SSID
@@ -879,17 +885,21 @@ def wifi_manager_worker() -> None:
     server_running = False
 
     def _start_mgmt_if_needed():
+        global _wifi_mgmt_active
         nonlocal server_running
         if not server_running:
+            _wifi_mgmt_active = True
             start_mgmt_server()
             server_running = True
             notify_device_connection()
 
     def _stop_mgmt_if_needed():
+        global _wifi_mgmt_active
         nonlocal server_running
         if server_running:
-            stop_mgmt_server()
             server_running = False
+            _wifi_mgmt_active = False
+            stop_mgmt_server()
 
     def _try_connect_upload() -> bool:
         if not ensure_hidden_wifi_profile():
@@ -2176,6 +2186,9 @@ def start_mgmt_server() -> None:
 
 def stop_mgmt_server() -> None:
     global _mgmt_server
+    if _usb_mgmt_active or _wifi_mgmt_active:
+        log(f"[MGMT] stop_mgmt_server skipped: usb={_usb_mgmt_active} wifi={_wifi_mgmt_active}")
+        return
     with _mgmt_server_lock:
         if _mgmt_server is None:
             return
@@ -2266,6 +2279,335 @@ def notify_device_connection() -> None:
         log(f"[MGMT] notify device connection failed: {e}")
 
 
+def get_usb_ip() -> Optional[str]:
+    """Lay IP cua usb0 (RNDIS/CDC-ECM khi cam day)."""
+    try:
+        if not pathlib.Path(f"/sys/class/net/{USB_IFACE}").exists():
+            return None
+        out = subprocess.check_output(
+            ["ip", "-4", "addr", "show", USB_IFACE],
+            text=True, timeout=3,
+            stderr=subprocess.DEVNULL,
+        )
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip = line.split()[1].split("/")[0]
+                log(f"[USB] usb0 IP: {ip}")
+                return ip
+    except Exception:
+        pass
+    return None
+
+
+def notify_device_connection_usb(usb_ip: str) -> None:
+    """Thong bao ket noi USB toi PC qua usb0 gateway."""
+    try:
+        # Gateway cua may tinh khi dung RNDIS thuong la .1 cung subnet
+        parts = usb_ip.rsplit(".", 1)
+        gateway = parts[0] + ".1" if len(parts) == 2 else REGISTRY_API_HOST
+        url = f"http://{gateway}:{DEVICE_CONNECTION_API_PORT}/api/device/connection"
+        requests.post(url, json={"ip": usb_ip, "type": "A"}, timeout=3)
+        log(f"[USB] notify device connection: ip={usb_ip} gateway={gateway}")
+    except Exception as e:
+        log(f"[USB] notify device connection failed: {e}")
+
+
+def usb_manager_worker() -> None:
+    """
+    Poll usb0 moi USB_POLL_INTERVAL_SEC giay.
+    - Co IP: bat mgmt server (neu chua bat), gui notify.
+    - Mat IP: tat mgmt server (neu WiFi mgmt cung khong active).
+    Khong anh huong gi toi WiFi logic.
+    """
+    global _usb_mgmt_active
+    was_connected = False
+    notify_last: float = 0.0
+
+    while True:
+        try:
+            usb_ip = get_usb_ip()
+            if usb_ip:
+                if not was_connected:
+                    log(f"[USB] connected: ip={usb_ip}")
+                    _usb_mgmt_active = True
+                    start_mgmt_server()
+                    was_connected = True
+                    notify_last = 0.0  # force notify ngay
+
+                now_mono = time.monotonic()
+                if now_mono - notify_last >= _runtime_wifi_retry_interval_sec:
+                    notify_last = now_mono
+                    notify_device_connection_usb(usb_ip)
+            else:
+                if was_connected:
+                    log("[USB] disconnected: ip lost")
+                    was_connected = False
+                    _usb_mgmt_active = False
+                    stop_mgmt_server()
+        except Exception as e:
+            log(f"[USB-MGR] exception: {e}")
+
+        time.sleep(USB_POLL_INTERVAL_SEC)
+
+
+def _serial_handle(req: dict) -> dict:
+    """
+    Xu ly 1 lenh JSON tu serial port. Tra ve dict se duoc ghi lai thanh 1 dong JSON.
+    Cac cmd tuong duong voi HTTP API cua _FileManagementHandler.
+    """
+    cmd = req.get("cmd", "")
+
+    if cmd == "status":
+        bins = list(REC_DIR.glob("*.bin"))
+        cfg = load_identity_config_from_disk() or build_default_identity_config()
+        dd = cfg.get("dinh_danh", {})
+        ch = cfg.get("cau_hinh_ghi_am", {})
+        return {
+            "ok": True,
+            "file_count": len(bins),
+            "mac_address": get_wlan_mac(),
+            "updated_at": cfg.get("updated_at", ""),
+            "dinh_danh": {
+                "ma_id": dd.get("ma_id", ""),
+                "ho_ten": dd.get("ho_ten", ""),
+                "nam_sinh": dd.get("nam_sinh", ""),
+                "dia_chi": dd.get("dia_chi", ""),
+                "ngay_cap_dinh_danh": dd.get("ngay_cap_dinh_danh", ""),
+                "ten_thiet_bi": dd.get("ten_thiet_bi", ""),
+                "id_thiet_bi": dd.get("id_thiet_bi", ""),
+                "dia_chi_thiet_bi": dd.get("dia_chi_thiet_bi", ""),
+            },
+            "ghi_am": {
+                "kieu_ghi_am": ch.get("kieu_ghi_am", ""),
+                "thoi_luong_ghi_am_phut": ch.get("thoi_luong_ghi_am_phut", ""),
+                "chu_ky_quet_wifi_phut": ch.get("chu_ky_quet_wifi_phut", ""),
+            },
+        }
+
+    if cmd == "filelist":
+        files = []
+        for p in sorted(REC_DIR.glob("*.bin")):
+            try:
+                size = p.stat().st_size
+                files.append({"name": p.name, "size": size, "size_human": _human_size(size)})
+            except Exception:
+                pass
+        return {"ok": True, "files": files}
+
+    if cmd == "config":
+        cfg = load_identity_config_from_disk()
+        if cfg is None:
+            cfg = build_default_identity_config()
+        dinh_danh = cfg.get("dinh_danh", {})
+        cau_hinh = cfg.get("cau_hinh_ghi_am", {})
+        return {
+            "ok": True,
+            "config": {
+                "dinh_danh": {
+                    "ma_id": dinh_danh.get("ma_id", ""),
+                    "ho_ten": dinh_danh.get("ho_ten", ""),
+                    "nam_sinh": dinh_danh.get("nam_sinh", 0),
+                    "dia_chi": dinh_danh.get("dia_chi", ""),
+                    "ngay_cap_dinh_danh": dinh_danh.get("ngay_cap_dinh_danh", ""),
+                    "ten_thiet_bi": dinh_danh.get("ten_thiet_bi", ""),
+                    "id_thiet_bi": dinh_danh.get("id_thiet_bi", ""),
+                    "dia_chi_thiet_bi": dinh_danh.get("dia_chi_thiet_bi", ""),
+                },
+                "cau_hinh_ghi_am": {
+                    "kieu_ghi_am": cau_hinh.get("kieu_ghi_am", DEFAULT_RECORD_MODE),
+                    "thoi_luong_ghi_am_phut": cau_hinh.get("thoi_luong_ghi_am_phut", DEFAULT_RECORD_MINUTES),
+                    "chu_ky_quet_wifi_phut": cau_hinh.get("chu_ky_quet_wifi_phut", DEFAULT_WIFI_RETRY_MINUTES),
+                    "ssid_upload": cau_hinh.get("ssid_upload", UPLOAD_TARGET_SSID),
+                    "wifi_password": cau_hinh.get("wifi_password", WIFI_PASSWORD),
+                    "duong_dan_public_key": cau_hinh.get("duong_dan_public_key", "public.key"),
+                    "vad_nguong_dbfs": cau_hinh.get("vad_nguong_dbfs", VAD_DEFAULT_THRESHOLD_DBFS),
+                    "vad_timeout_im_lang_giay": cau_hinh.get("vad_timeout_im_lang_giay", VAD_DEFAULT_SILENCE_TIMEOUT_SEC),
+                    "vad_max_thoi_gian_giay": cau_hinh.get("vad_max_thoi_gian_giay", VAD_DEFAULT_MAX_DURATION_SEC),
+                    "bat_dau_ghi_am": cau_hinh.get("bat_dau_ghi_am", None),
+                    "ket_thuc_ghi_am": cau_hinh.get("ket_thuc_ghi_am", None),
+                },
+            },
+            "updated_at": cfg.get("updated_at", ""),
+            "config_path": str(PI_IDENTITY_CONFIG_PATH),
+            "mac_address": get_wlan_mac(),
+        }
+
+    if cmd == "config_set":
+        patch_cfg = req.get("config")
+        if not isinstance(patch_cfg, dict):
+            return {"ok": False, "error": "missing config object"}
+        base_cfg = build_default_identity_config()
+        disk_cfg = load_identity_config_from_disk()
+        if isinstance(disk_cfg, dict):
+            base_cfg = _deep_merge_dict(base_cfg, disk_cfg)
+        next_cfg = _deep_merge_dict(base_cfg, patch_cfg)
+        next_cfg["updated_at"] = now_iso_local()
+        valid, reason = validate_identity_config(next_cfg)
+        if not valid:
+            return {"ok": False, "error": f"invalid config: {reason}"}
+        if not write_identity_config_atomic(next_cfg, PI_IDENTITY_CONFIG_PATH):
+            return {"ok": False, "error": "failed to write config"}
+        log("[SERIAL] config updated via serial, scheduling service restart")
+        _schedule_self_restart()
+        return {"ok": True, "message": "config saved, service restarting"}
+
+    if cmd == "download":
+        name = req.get("name", "")
+        if not name:
+            return {"ok": False, "error": "missing name"}
+        target = (REC_DIR / name).resolve()
+        if not str(target).startswith(str(REC_DIR.resolve())):
+            return {"ok": False, "error": "forbidden"}
+        if not target.exists() or not target.is_file():
+            return {"ok": False, "error": "not_found"}
+        data_b64 = base64.b64encode(target.read_bytes()).decode("ascii")
+        target.unlink(missing_ok=True)
+        log(f"[SERIAL] download+delete: {name}")
+        return {"ok": True, "name": name, "data_b64": data_b64}
+
+    if cmd == "download_all":
+        bins = sorted(REC_DIR.glob("*.bin"))
+        if not bins:
+            return {"ok": False, "error": "no files"}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in bins:
+                zf.write(p, p.name)
+        data_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {"ok": True, "filename": "recordings.zip", "data_b64": data_b64}
+
+    if cmd == "download_selected":
+        names = req.get("names", [])
+        if not names or not isinstance(names, list):
+            return {"ok": False, "error": "missing names"}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in names:
+                target = (REC_DIR / os.path.basename(name)).resolve()
+                if str(target).startswith(str(REC_DIR.resolve())) and target.exists():
+                    zf.write(target, target.name)
+        data_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {"ok": True, "filename": "selected.zip", "data_b64": data_b64}
+
+    if cmd == "delete":
+        name = req.get("name", "")
+        if not name:
+            return {"ok": False, "error": "missing name"}
+        target = (REC_DIR / name).resolve()
+        if not str(target).startswith(str(REC_DIR.resolve())):
+            return {"ok": False, "error": "forbidden"}
+        if not target.exists():
+            return {"ok": False, "error": "not_found"}
+        target.unlink(missing_ok=True)
+        log(f"[SERIAL] deleted: {name}")
+        return {"ok": True}
+
+    if cmd == "delete_all":
+        deleted = []
+        for p in list(REC_DIR.glob("*.bin")):
+            try:
+                p.unlink(missing_ok=True)
+                deleted.append(p.name)
+            except Exception:
+                pass
+        log(f"[SERIAL] delete-all: {len(deleted)} files")
+        return {"ok": True, "deleted": len(deleted)}
+
+    if cmd == "public_key":
+        key_b64 = req.get("data_b64", "")
+        if not key_b64:
+            return {"ok": False, "error": "missing data_b64"}
+        try:
+            key_bytes = base64.b64decode(key_b64)
+        except Exception:
+            return {"ok": False, "error": "invalid base64"}
+        if len(key_bytes) < PHTM_KEY_SIZE:
+            return {"ok": False, "error": f"key too short: need >= {PHTM_KEY_SIZE} bytes"}
+        cfg = load_identity_config_from_disk() or build_default_identity_config()
+        cfg_path_raw = ((cfg.get("cau_hinh_ghi_am") or {}).get("duong_dan_public_key") or "public.key")
+        key_path = resolve_public_key_path(str(cfg_path_raw))
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key_bytes)
+        log(f"[SERIAL] public key updated: {key_path} size={len(key_bytes)}")
+        _schedule_self_restart()
+        return {"ok": True, "message": "public key saved, service restarting", "size": len(key_bytes)}
+
+    return {"ok": False, "error": f"unknown cmd: {cmd}"}
+
+
+def serial_worker() -> None:
+    """
+    Doc lenh JSON 1 dong tu SERIAL_DEV, xu ly, tra ket qua JSON 1 dong.
+    Tu dong mo lai neu mat ket noi hoac chua cam day.
+    Dung O_NONBLOCK chi de tranh block luc open(); sau do chuyen sang blocking raw mode.
+    """
+    import select
+    import fcntl
+    import termios
+    while True:
+        if not pathlib.Path(SERIAL_DEV).exists():
+            time.sleep(3)
+            continue
+        fd = -1
+        try:
+            fd = os.open(SERIAL_DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            # Xoa O_NONBLOCK sau khi open thanh cong
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            # Dat tty ve raw mode: tat canonical/echo/signal, khong xu ly line discipline
+            # De JSON binary khong bi mangle boi kernel tty layer
+            attrs = termios.tcgetattr(fd)
+            attrs[0] = 0                                                    # iflag: tat moi input processing
+            attrs[1] = 0                                                    # oflag: tat output processing
+            attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL        # cflag: 8-bit, enable read, ignore modem
+            attrs[3] = 0                                                    # lflag: tat echo, canonical, signals
+            attrs[4] = termios.B115200                                      # baud in
+            attrs[5] = termios.B115200                                      # baud out
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            log(f"[SERIAL] opened {SERIAL_DEV}")
+            buf = b""
+            while True:
+                ready, _, _ = select.select([fd], [], [], 1.0)
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError as e:
+                    log(f"[SERIAL] read error: {e}")
+                    break
+                if not chunk:
+                    log("[SERIAL] EOF — PC disconnected")
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        req = json.loads(line.decode("utf-8", errors="replace"))
+                        resp = _serial_handle(req)
+                    except Exception as e:
+                        resp = {"ok": False, "error": str(e)}
+                    try:
+                        data = (json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")
+                        os.write(fd, data)
+                    except Exception as we:
+                        log(f"[SERIAL] write error: {we}")
+                        break
+        except Exception as e:
+            log(f"[SERIAL] error: {e}")
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            fd = -1
+        time.sleep(3)
+
+
 def _current_corrected_time() -> datetime:
     return datetime.now() + timedelta(seconds=_time_offset_sec)
 
@@ -2332,6 +2674,20 @@ def main() -> None:
         name="wifi-manager-worker",
     )
     wifi_worker.start()
+
+    usb_worker = threading.Thread(
+        target=usb_manager_worker,
+        daemon=True,
+        name="usb-manager-worker",
+    )
+    usb_worker.start()
+
+    serial_thr = threading.Thread(
+        target=serial_worker,
+        daemon=True,
+        name="serial-worker",
+    )
+    serial_thr.start()
 
     log("[PI2W] client started")
     log(f"[PI2W] rec dir: {REC_DIR}")
