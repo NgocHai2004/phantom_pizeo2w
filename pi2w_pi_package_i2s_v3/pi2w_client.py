@@ -122,6 +122,7 @@ _runtime_vad_monitor_interval_sec = VAD_DEFAULT_MONITOR_INTERVAL_SEC
 _runtime_interval_cycle_sec: int = DEFAULT_INTERVAL_MINUTES * 60  # chu ky giua 2 lan ghi (interval mode)
 _runtime_scheduled_start: Optional[str] = None  # "YYYY-MM-DD HH:MM", None = chua cau hinh
 _runtime_scheduled_end: Optional[str] = None    # "YYYY-MM-DD HH:MM", None = ghi den khi tat
+_runtime_device_addr: str = ""
 _wifi_nmcli_lock = threading.Lock()
 
 # Event de bao wifi_manager_worker rescan ngay sau khi upload xong va ngat ket noi
@@ -573,16 +574,23 @@ def cleanup_leftover_temp_audio_on_startup() -> None:
     log(f"[STARTUP] cleanup done deleted_wav={deleted_wav} pending_opus={opus_count} pending_bin={bin_count}")
 
 
+def _sanitize_addr_for_filename(addr: str) -> str:
+    s = re.sub(r'[^\w\-]', '_', addr.strip(), flags=re.UNICODE)
+    s = re.sub(r'_+', '_', s).strip('_')
+    return s[:40] if s else "unknown"
+
+
 def next_wav_path() -> pathlib.Path:
     corrected = datetime.now() + timedelta(seconds=_time_offset_sec)
     ts = corrected.strftime("%Y%m%d_%H%M%S")
-    base = REC_DIR / f"rec2_{ts}.wav"
+    addr = _sanitize_addr_for_filename(_runtime_device_addr)
+    base = REC_DIR / f"record_{addr}_{ts}.wav"
     if not base.exists():
         return base
 
     suffix = 1
     while True:
-        p = REC_DIR / f"rec2_{ts}_{suffix:02d}.wav"
+        p = REC_DIR / f"record_{addr}_{ts}_{suffix:02d}.wav"
         if not p.exists():
             return p
         suffix += 1
@@ -2285,6 +2293,7 @@ def main() -> None:
     global _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec
     global _runtime_interval_cycle_sec
     global _runtime_scheduled_start, _runtime_scheduled_end
+    global _runtime_device_addr
 
     ensure_dirs()
 
@@ -2294,6 +2303,7 @@ def main() -> None:
 
     active_config = load_identity_config_from_disk() or build_default_identity_config()
     active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec, _runtime_scheduled_start, _runtime_scheduled_end = derive_runtime_settings(active_config)
+    _runtime_device_addr = active_config.get("dinh_danh", {}).get("dia_chi_thiet_bi", "")
 
     last_config_mtime = None
     if PI_IDENTITY_CONFIG_PATH.exists():
@@ -2356,6 +2366,7 @@ def main() -> None:
 
                     active_config = cfg
                     active_mode, active_duration_sec, _runtime_wifi_retry_interval_sec, _runtime_upload_target_ssid, _runtime_wifi_password, _runtime_arecord_device, _runtime_arecord_channels, _runtime_arecord_rate, _runtime_arecord_format, _runtime_public_key_path, _runtime_prefer_hidden_wifi_immediate, _runtime_vad_threshold_dbfs, _runtime_vad_silence_timeout_sec, _runtime_vad_max_duration_sec, _runtime_interval_cycle_sec, _runtime_scheduled_start, _runtime_scheduled_end = derive_runtime_settings(active_config)
+                    _runtime_device_addr = active_config.get("dinh_danh", {}).get("dia_chi_thiet_bi", "")
                     last_config_mtime = current_mtime
 
                     log(
