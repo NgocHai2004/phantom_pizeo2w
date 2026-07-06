@@ -2533,6 +2533,23 @@ def _serial_handle(req: dict) -> dict:
         _schedule_self_restart()
         return {"ok": True, "message": "public key saved, service restarting", "size": len(key_bytes)}
 
+    if cmd == "upload_bin":
+        name = req.get("name", "")
+        data_b64 = req.get("data_b64", "")
+        if not name or not data_b64:
+            return {"ok": False, "error": "missing name or data_b64"}
+        name = os.path.basename(name)
+        if not name.endswith(".bin"):
+            name += ".bin"
+        try:
+            data = base64.b64decode(data_b64)
+        except Exception:
+            return {"ok": False, "error": "invalid base64"}
+        dest = REC_DIR / name
+        dest.write_bytes(data)
+        log(f"[SERIAL] upload_bin: {name} size={len(data)}")
+        return {"ok": True, "name": name, "size": len(data)}
+
     return {"ok": False, "error": f"unknown cmd: {cmd}"}
 
 
