@@ -1,16 +1,16 @@
 ﻿# HUONG DAN CAI DAT PI2W CLIENT (CHI CHO RASPBERRY PI OS)
 
-Tai lieu nay chi dung cho Raspberry Pi OS, chuan hoa theo user chay dich vu `pizero21`.
+Tai lieu nay chi dung cho Raspberry Pi OS, chuan hoa theo user chay dich vu `pizero22`.
 
 ## 1) Muc tieu sau cai dat
 Service se chay tai:
-- `/home/pizero21/pi2w/pi2w_client.py`
+- `/home/pizero22/pi2w/pi2w_client.py`
 
 Config active:
-- `/home/pizero21/rec/pi_identity_config.json`
+- `/home/pizero22/rec/pi_identity_config.json`
 
 Key active:
-- `/home/pizero21/public.key`
+- `/home/pizero22/public.key`
 
 ## 2) Dieu kien can
 - Raspberry Pi Zero 2 W
@@ -27,9 +27,9 @@ cd ~/pi2w_pi_package/pi2w_pi_package_i2s_v3
 chmod +x install_pi.sh
 ```
 
-## 4) Cai dat (co dinh user pizero21)
+## 4) Cai dat (co dinh user pizero22)
 ```bash
-export APP_USER=pizero21
+export APP_USER=pizero22
 ./install_pi.sh
 ```
 
@@ -57,15 +57,15 @@ sudo systemctl cat pi2w_client.service
 ```
 
 Can thay:
-- `User=pizero21`
-- `WorkingDirectory=/home/pizero21/pi2w`
-- `ExecStart=/home/pizero21/pi2w/.venv/bin/python /home/pizero21/pi2w/pi2w_client.py`
+- `User=pizero22`
+- `WorkingDirectory=/home/pizero22/pi2w`
+- `ExecStart=/home/pizero22/pi2w/.venv/bin/python /home/pizero22/pi2w/pi2w_client.py`
 
 ## 8) Kiem tra config active
 ```bash
-CFG="/home/pizero21/rec/pi_identity_config.json"
-KEY="/home/pizero21/public.key"
-APP_MAIN="/home/pizero21/pi2w/pi2w_client.py"
+CFG="/home/pizero22/rec/pi_identity_config.json"
+KEY="/home/pizero22/public.key"
+APP_MAIN="/home/pizero22/pi2w/pi2w_client.py"
 
 ls -l "$APP_MAIN" "$CFG" "$KEY"
 cat "$CFG"
@@ -102,30 +102,30 @@ sudo journalctl -u pi2w_client.service -f
 ```
 
 ## 11) Loi thuong gap
-- `Cannot read key file /home/pizero21/public.key`
+- `Cannot read key file /home/pizero22/public.key`
   - Kiem tra file key:
 ```bash
-ls -l /home/pizero21/public.key
+ls -l /home/pizero22/public.key
 ```
 
 - Khong thay file upload
-  - Kiem tra dung thu muc `/home/pizero21/rec`.
+  - Kiem tra dung thu muc `/home/pizero22/rec`.
 
 - `wlan0 unmanaged`
   - Chay lai:
 ```bash
 cd ~/pi2w_pi_package/pi2w_pi_package_i2s_v3
-export APP_USER=pizero21
+export APP_USER=pizero22
 ./install_pi.sh
 ```
 
 ## 12) Checklist ban giao
 - Service active: `systemctl is-active pi2w_client.service` = `active`
-- `User=pizero21` dung trong service
+- `User=pizero22` dung trong service
 - Co file:
-  - `/home/pizero21/pi2w/pi2w_client.py`
-  - `/home/pizero21/rec/pi_identity_config.json`
-  - `/home/pizero21/public.key`
+  - `/home/pizero22/pi2w/pi2w_client.py`
+  - `/home/pizero22/rec/pi_identity_config.json`
+  - `/home/pizero22/public.key`
 - Log co `[REC] OK`, `[OPUS] OK`, `[PHTM3L1] OK`
 
 
