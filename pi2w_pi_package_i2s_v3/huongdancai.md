@@ -94,14 +94,12 @@ sudo usermod -aG netdev "$USER"
 sudo bash -c 'cat > /etc/polkit-1/rules.d/50-nmcli-user.rules <<EOF
 polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
-        subject.user === "pizero21") {
+        subject.user === "pizero23") {
         return polkit.Result.YES;
     }
 });
 EOF'
 ```
-
-> Thay `pizero21` bang ten user thuc te.
 
 ```bash
 sudo systemctl restart polkit
@@ -257,7 +255,7 @@ grep -q 'modules-load=dwc2,g_serial' "$CMDLINE" || \
 
 Reboot:
 ```bash
-sudo reboot
+  sudo reboot
 ```
 
 ### Buoc 2: Kiem tra Pi da co /dev/ttyGS0

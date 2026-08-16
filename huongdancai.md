@@ -29,7 +29,7 @@ chmod +x install_pi.sh
 
 ## 4) Cai dat (co dinh user pizero22)
 ```bash
-export APP_USER=pizero22
+export APP_USER=pizero23
 ./install_pi.sh
 ```
 

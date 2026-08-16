@@ -188,6 +188,20 @@ run_root sed -i "s|^ExecStart=.*|ExecStart=$VENV_DIR/bin/python $APP_DIR/pi2w_cl
 run_root systemctl daemon-reload
 run_root systemctl enable --now pi2w_client.service
 
+# Cap quyen nmcli cho APP_USER
+run_root usermod -aG netdev "$APP_USER" || true
+
+run_root bash -c "cat > /etc/polkit-1/rules.d/50-nmcli-user.rules <<EOF
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf(\"org.freedesktop.NetworkManager.\") === 0 &&
+        subject.user === \"$APP_USER\") {
+        return polkit.Result.YES;
+    }
+});
+EOF"
+
+run_root systemctl restart polkit || true
+
 echo "[DONE] Install finished"
 echo "[INFO] Config: $CFG_PATH"
 echo "[INFO] Service:"
