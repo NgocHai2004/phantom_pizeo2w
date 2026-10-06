@@ -1,4 +1,4 @@
-﻿# HUONG DAN CAI DAT PI2W CLIENT (CHI CHO RASPBERRY PI OS)
+# HUONG DAN CAI DAT PI2W CLIENT (CHI CHO RASPBERRY PI OS)
 
 Tai lieu nay chi dung cho Raspberry Pi OS, chuan hoa theo user chay dich vu `pizero22`.
 
@@ -87,7 +87,7 @@ sudo systemctl restart pi2w_client.service
 ## 9) Kiem tra mic nhanh
 ```bash
 arecord -l
-arecord -D hw:1,0 -c 1 -r 16000 -f S32_LE -d 3 /tmp/test_i2s.wav
+arecord -D hw:1,0 -c 1 -r 44100 -f S32_LE -d 3 /tmp/test_i2s.wav
 ls -lh /tmp/test_i2s.wav
 ```
 

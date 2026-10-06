@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import os
 import time
 import pathlib
@@ -20,6 +20,7 @@ import zipfile
 import io
 
 import requests
+import random
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from cryptography.hazmat.primitives import hmac as _hmac, hashes as _hashes
 from cryptography.hazmat.backends import default_backend as _backend
@@ -27,13 +28,49 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization
 
-
 # === WiFi target hidden ===
-# Chi dung 1 WiFi an nay de upload.
-UPLOAD_TARGET_SSID = "7068616e746f6d303030303030300002"
+# Chi dung 1 WiFi an nay de upload khoi dau.
+# Phai khop AP_SSID/AP_PASS trong Phantom_esp_r3b/R3b_S3/src/main.cpp
+# (= phan tu dau ssid_list.bin, xem gen_ssid_list.py DEFAULT_ENTRY).
+UPLOAD_TARGET_SSID = "1A3bcba8b69c7aea0c5942b5ce87f102"
 # WiFi quan ly file (PC app ket noi de xem/tai/xoa file rec/).
-MGMT_TARGET_SSID   = "7068616e746f6d303030303030300001"
-WIFI_PASSWORD = "12345678"
+MGMT_TARGET_SSID   = "1A00a60d349d091982c62e3b7561c38f"
+WIFI_PASSWORD = "d1b07167d06adf161a21d4096041d40b"
+# Pass rieng cho mang MGMT (0001) do PC phat. Tach khoi WIFI_PASSWORD vi
+# WIFI_PASSWORD con dung cho profile upload 0002 - doi chung se lam hong ca 2.
+MGMT_WIFI_PASSWORD = "afd4fa706f49d71cc98d2a7a87284a7a"
+
+# === Handshake Dynamic 100,000 SSID List (Binary O(1) Seek) ===
+SSID_BIN_PATH = pathlib.Path(__file__).parent / "ssid_list.bin"
+SSID_RECORD_SIZE = 64
+SSID_LIST_MAX = 100000
+
+def get_ssid_entry_from_bin(idx: int) -> tuple[str, str]:
+    if idx == 0:
+        return UPLOAD_TARGET_SSID, WIFI_PASSWORD
+    if SSID_BIN_PATH.exists():
+        try:
+            with open(SSID_BIN_PATH, "rb") as f:
+                f.seek(idx * SSID_RECORD_SIZE)
+                chunk = f.read(SSID_RECORD_SIZE)
+                if len(chunk) == SSID_RECORD_SIZE:
+                    ssid = chunk[:32].decode("ascii", errors="ignore").strip("\x00 ")
+                    passwd = chunk[32:64].decode("ascii", errors="ignore").strip("\x00 ")
+                    if ssid and passwd:
+                        return ssid, passwd
+        except Exception as e:
+            log(f"[SSID-BIN] error reading index {idx}: {e}")
+    return UPLOAD_TARGET_SSID, WIFI_PASSWORD
+
+def get_total_ssid_count() -> int:
+    if SSID_BIN_PATH.exists():
+        try:
+            sz = SSID_BIN_PATH.stat().st_size
+            count = sz // SSID_RECORD_SIZE
+            return min(count, SSID_LIST_MAX)
+        except Exception:
+            pass
+    return 1
 
 # WiFi an: dung profile NetworkManager da cau hinh san / tao san.
 # Ly do: "nmcli dev wifi connect ... hidden yes" co the loi key-mgmt.
@@ -44,7 +81,7 @@ WIFI_IFACE = "wlan0"
 WIFI_CONNECT_TIMEOUT_SEC = 20
 WIFI_CONNECT_FAST_TIMEOUT_SEC = 8
 WIFI_RETRY_INTERVAL_SEC = 120
-WIFI_SCAN_INTERVAL_SEC = 120          # 2 phut giua cac lan quet khi khong thay WiFi
+WIFI_SCAN_INTERVAL_SEC = 60           # 1 phut giua cac lan quet khi khong thay WiFi
 IMMEDIATE_HIDDEN_WIFI_CHECK_SEC = 5
 
 # Sau khi upload thanh cong het cac file .bin thi ngat ket noi WiFi upload.
@@ -55,7 +92,31 @@ WIFI_DISCONNECT_TIMEOUT_SEC = 10
 UPLOAD_HOST = "10.42.0.1"
 UPLOAD_PORT = 8765
 UPLOAD_PATH = "/api/upload"
-# Device dang dung user pizero2, khong dung /home/pi nua.
+
+def post_handshake_to_target(idx: int, target_ip: str = UPLOAD_HOST, port: int = UPLOAD_PORT) -> bool:
+    url = f"http://{target_ip}:{port}/api/handshake"
+    payload = {"index": idx}
+    try:
+        r = requests.post(url, json=payload, timeout=5)
+        log(f"[HANDSHAKE] POST {url} idx={idx} -> {r.status_code} resp={r.text}")
+        if r.status_code == 200 and r.json().get("ok") is True:
+            return True
+    except Exception as e:
+        log(f"[HANDSHAKE] POST {url} idx={idx} error: {e}")
+    return False
+
+def apply_upload_wifi_credentials(ssid: str, password: str) -> bool:
+    modify_cmds = [
+        ["nmcli", "connection", "modify", WIFI_CONNECTION_PROFILE, "802-11-wireless.ssid", ssid],
+        ["nmcli", "connection", "modify", WIFI_CONNECTION_PROFILE, "wifi-sec.psk", password],
+    ]
+    with _wifi_nmcli_lock:
+        for cmd in modify_cmds:
+            rc, _, _ = _run_cmd_logged(cmd, timeout_sec=10)
+            if rc != 0:
+                return False
+    return True
+# Device dang dung user pizero24, khong dung /home/pi nua.
 REC_DIR = pathlib.Path.home() / "rec"
 PI_IDENTITY_CONFIG_PATH = REC_DIR / "pi_identity_config.json"
 PI_IDENTITY_CONFIG_TMP_PATH = REC_DIR / "pi_identity_config.tmp"
@@ -81,9 +142,9 @@ MAX_FILE_SIZE = 60_000_000
 MIN_VALID_ENC_REC_SIZE = 512
 
 # Mac dinh cho mic I2S (co the doi trong file config).
-ARECORD_DEVICE = "hw:1,0"
+ARECORD_DEVICE = "hw:0,0"
 ARECORD_CHANNELS = "1"
-ARECORD_RATE = "16000"
+ARECORD_RATE = "48000"
 ARECORD_FORMAT = "S32_LE"
 # Nen WAV sang Opus truoc khi ma hoa. Can cai ffmpeg:
 # sudo apt update && sudo apt install -y ffmpeg
@@ -771,7 +832,7 @@ def ensure_mgmt_wifi_profile() -> bool:
     Tuong duong chay tay:
       nmcli connection add type wifi ifname wlan0 con-name phantom_mgmt ssid "...0001"
       nmcli connection modify phantom_mgmt 802-11-wireless.hidden yes \\
-        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "12345678" \\
+        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<MGMT_WIFI_PASSWORD>" \\
         connection.autoconnect yes connection.autoconnect-priority 999
     """
     _cleanup_duplicate_profiles(MGMT_WIFI_CONNECTION_PROFILE)
@@ -792,9 +853,9 @@ def ensure_mgmt_wifi_profile() -> bool:
 
     modify_cmds = [
         ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "802-11-wireless.ssid", MGMT_TARGET_SSID],
-        ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "802-11-wireless.hidden", "no"],
+        ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "802-11-wireless.hidden", "yes"],
         ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "wifi-sec.key-mgmt", "wpa-psk"],
-        ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "wifi-sec.psk", WIFI_PASSWORD],
+        ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "wifi-sec.psk", MGMT_WIFI_PASSWORD],
         ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "connection.autoconnect", "yes"],
         ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "connection.autoconnect-priority", "999"],
         ["nmcli", "connection", "modify", MGMT_WIFI_CONNECTION_PROFILE, "connection.autoconnect-retries", "-1"],
@@ -1598,6 +1659,36 @@ def upload_all_rec_bins(force: bool = False) -> bool:
         log(f"[UPLOAD] Skip: not on upload WiFi ssid={now_ssid} connection={now_con}")
         return False
 
+    total_ssids = get_total_ssid_count()
+    handshake_success = False
+
+    if total_ssids > 1:
+        # Chon ngau nhien index tu 1..total_ssids-1
+        idx = random.randint(1, total_ssids - 1)
+        dyn_ssid, dyn_pass = get_ssid_entry_from_bin(idx)
+        log(f"[HANDSHAKE] Attempting handshake with target for dynamic index={idx} ssid={dyn_ssid}")
+        if post_handshake_to_target(idx):
+            time.sleep(0.8)  # Doi R3b bat AP dong
+            if apply_upload_wifi_credentials(dyn_ssid, dyn_pass):
+                cmd_up = [
+                    "nmcli", "-w", str(WIFI_CONNECT_FAST_TIMEOUT_SEC),
+                    "connection", "up", WIFI_CONNECTION_PROFILE,
+                    "ifname", WIFI_IFACE,
+                ]
+                with _wifi_nmcli_lock:
+                    rc_up, _, _ = _run_cmd_logged(cmd_up, timeout_sec=WIFI_CONNECT_FAST_TIMEOUT_SEC + 5)
+                time.sleep(1)
+                if rc_up == 0:
+                    handshake_success = True
+                    log(f"[HANDSHAKE] Connected to dynamic SSID successfully: {dyn_ssid}")
+                else:
+                    log(f"[HANDSHAKE] FAIL connect dynamic SSID: {dyn_ssid}, reverting")
+                    apply_upload_wifi_credentials(_runtime_upload_target_ssid, _runtime_wifi_password)
+            else:
+                log("[HANDSHAKE] FAIL apply dynamic credentials to profile")
+        else:
+            log("[HANDSHAKE] Handshake rejected or failed, continuing on default SSID")
+
     failed = 0
     uploaded_count = 0
     uploaded_bytes = 0
@@ -1606,39 +1697,44 @@ def upload_all_rec_bins(force: bool = False) -> bool:
     batch_t0 = time.time()
     log(f"[UPLOAD] BATCH start files={len(bins)}")
 
-    for p in bins:
-        try:
-            size = p.stat().st_size
-        except Exception as e:
-            log(f"[UPLOAD] FAIL stat {p.name}: {e}")
-            failed += 1
-            continue
-
-        if not is_valid_enc_size(size):
-            log(f"[UPLOAD] Skip invalid bin: {p.name} size={size}")
-            skipped_count += 1
-            continue
-
-        ok = upload_file_to_http_api(p)
-
-        if ok:
+    try:
+        for p in bins:
             try:
-                p.unlink(missing_ok=True)
-                uploaded_count += 1
-                uploaded_bytes += size
-                log(f"[UPLOAD] DELETE {p.name}")
+                size = p.stat().st_size
             except Exception as e:
-                log(f"[UPLOAD] FAIL delete uploaded bin {p.name}: {e}")
+                log(f"[UPLOAD] FAIL stat {p.name}: {e}")
                 failed += 1
-        else:
-            failed += 1
+                continue
+
+            if not is_valid_enc_size(size):
+                log(f"[UPLOAD] Skip invalid bin: {p.name} size={size}")
+                skipped_count += 1
+                continue
+
+            ok = upload_file_to_http_api(p)
+
+            if ok:
+                try:
+                    p.unlink(missing_ok=True)
+                    uploaded_count += 1
+                    uploaded_bytes += size
+                    log(f"[UPLOAD] DELETE {p.name}")
+                except Exception as e:
+                    log(f"[UPLOAD] FAIL delete uploaded bin {p.name}: {e}")
+                    failed += 1
+            else:
+                failed += 1
+    finally:
+        # Neu da doi sang dynamic SSID -> luon hoan nguyen ve default AP credentials
+        if handshake_success:
+            log(f"[HANDSHAKE] Reverting profile to default upload SSID: {_runtime_upload_target_ssid}")
+            apply_upload_wifi_credentials(_runtime_upload_target_ssid, _runtime_wifi_password)
 
     batch_elapsed_sec = time.time() - batch_t0
     batch_elapsed_ms = int(batch_elapsed_sec * 1000)
     batch_speed = upload_speed_text(uploaded_bytes, batch_elapsed_sec) if uploaded_bytes > 0 else "speed=0"
 
     # Thanh cong neu da upload het tat ca file .bin hop le.
-    # Cac file .bin invalid/0 byte (vd: ".bin" size=0) khong tinh vao dieu kien disconnect.
     valid_count = len(bins) - skipped_count
     batch_success = failed == 0 and uploaded_count == valid_count
 

@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pizero22
-WorkingDirectory=/home/pizero22/pi2w
-ExecStart=/home/pizero22/pi2w/.venv/bin/python /home/pizero22/pi2w/pi2w_client.py
+User=pizero24
+WorkingDirectory=/home/pizero24/pi2w
+ExecStart=/home/pizero24/pi2w/.venv/bin/python /home/pizero24/pi2w/pi2w_client.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

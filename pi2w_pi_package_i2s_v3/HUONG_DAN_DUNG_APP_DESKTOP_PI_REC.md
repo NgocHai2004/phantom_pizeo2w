@@ -18,7 +18,7 @@ Trường quan trọng trong `cau_hinh_ghi_am`
 - `mic_loai`: `i2s`
 - `mic_i2s_device`: ví dụ `hw:0,0` hoặc `hw:1,0`
 - `mic_i2s_channels`: ví dụ `1`
-- `mic_i2s_rate`: ví dụ `16000`
+- `mic_i2s_rate`: ví dụ `44100`
 - `mic_i2s_format`: ví dụ `S32_LE`
 - `duong_dan_public_key`: mặc định `public.key`, có thể đổi sang file key khác
 
@@ -41,7 +41,7 @@ Ví dụ config hiện tại
     "mic_loai": "i2s",
     "mic_i2s_device": "hw:0,0",
     "mic_i2s_channels": 1,
-    "mic_i2s_rate": 16000,
+    "mic_i2s_rate": 44100,
     "mic_i2s_format": "S32_LE",
     "duong_dan_public_key": "public.key"
   },
@@ -73,14 +73,14 @@ cd pi2w_pi_package
 
 Lưu ý nếu bạn dùng root shell
 - Script sẽ cài service chạy user thật (`APP_USER=...`).
-- Ví dụ user là `pizero2`.
+- Ví dụ user là `pizero24`.
 
 Bước 2A: Ubuntu/Armbian/Debian/Raspberry Pi OS
 ```bash
 sed -i '1s/^\xEF\xBB\xBF//' install_pi.sh install_arch.sh
 sed -i 's/\r$//' install_pi.sh install_arch.sh pi2w_client.service
 chmod +x install_pi.sh
-APP_USER=pizero2 ./install_pi.sh
+APP_USER=pizero24 ./install_pi.sh
 ```
 
 Bước 2B: Arch Linux / Arch Linux ARM
@@ -88,22 +88,22 @@ Bước 2B: Arch Linux / Arch Linux ARM
 sed -i '1s/^\xEF\xBB\xBF//' install_pi.sh install_arch.sh
 sed -i 's/\r$//' install_pi.sh install_arch.sh pi2w_client.service
 chmod +x install_arch.sh
-APP_USER=pizero2 ./install_arch.sh
+APP_USER=pizero24 ./install_arch.sh
 ```
 
 Bước 3: copy public key mặc định (nếu chưa có)
 ```bash
-cp -f public.key /home/pizero2/public.key
+cp -f public.key /home/pizero24/public.key
 ```
 
 Nếu muốn dùng key khác
 1) Copy key mới lên Pi, ví dụ:
 ```bash
-cp -f my_other.key /home/pizero2/keys/my_other.key
+cp -f my_other.key /home/pizero24/keys/my_other.key
 ```
 2) Sửa config:
 ```json
-"duong_dan_public_key": "/home/pizero2/keys/my_other.key"
+"duong_dan_public_key": "/home/pizero24/keys/my_other.key"
 ```
 3) Restart service:
 ```bash

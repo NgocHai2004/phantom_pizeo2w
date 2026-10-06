@@ -33,7 +33,7 @@ chmod +x install_pi.sh
 APP_USER="$USER" ./install_pi.sh
 ```
 
-> Neu dang SSH bang root: `APP_USER=pizero21 ./install_pi.sh` (thay `pizero21` bang user thuc te)
+> Neu dang SSH bang root: `APP_USER=pizero24 ./install_pi.sh` (thay `pizero24` bang user thuc te tren may)
 
 Script tu dong:
 - Cai ffmpeg, alsa-utils, python3, NetworkManager
@@ -74,9 +74,17 @@ arecord -l
 
 Tim dong co dang `card X: sndrpigooglevoi ...` — ghi nho so X.
 
+Vi du output thuc te (card = 0):
+```
+**** List of CAPTURE Hardware Devices ****
+card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: Google voiceHAT SoundCard HiFi voicehat-hifi-0
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
+```
+
 ```bash
-# Thay X bang so card tim duoc o tren (thuong la 1)
-arecord -D plughw:1,0 -c 2 -r 48000 -f S32_LE -d 3 /tmp/test.wav
+# Thay X bang so card tim duoc o tren (vi du tren la 0)
+arecord -D plughw:0,0 -c 2 -r 48000 -f S32_LE -d 3 /tmp/test.wav
 ls -lh /tmp/test.wav
 ```
 
@@ -86,19 +94,31 @@ File > 0 byte la mic hoat dong.
 
 ## Buoc 6: Cap quyen nmcli cho user
 
+Kiem tra user hien tai (vi du may nay la `pizero24`):
+```bash
+echo "$USER"
+```
+
 ```bash
 sudo usermod -aG netdev "$USER"
 ```
 
+Tao polkit rule cho dung user do (`$USER` tu dien vao, khong can sua tay):
 ```bash
-sudo bash -c 'cat > /etc/polkit-1/rules.d/50-nmcli-user.rules <<EOF
+sudo tee /etc/polkit-1/rules.d/50-nmcli-user.rules >/dev/null <<EOF
 polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
-        subject.user === "pizero23") {
+        subject.user === "$USER") {
         return polkit.Result.YES;
     }
 });
-EOF'
+EOF
+```
+
+Kiem tra lai file da ghi dung user:
+```bash
+sudo cat /etc/polkit-1/rules.d/50-nmcli-user.rules
+# Phai thay: subject.user === "pizero24"
 ```
 
 ```bash
@@ -135,7 +155,7 @@ Mau config chuan cho Google VoiceHAT:
     "wifi_password": "12345678",
     "uu_tien_wifi_an_lap_tuc": true,
     "mic_loai": "i2s",
-    "mic_i2s_device": "plughw:1,0",
+    "mic_i2s_device": "plughw:0,0",
     "mic_i2s_channels": 2,
     "mic_i2s_rate": 48000,
     "mic_i2s_format": "S32_LE",
@@ -310,14 +330,43 @@ python pi2w_pi_package_i2s_v3\phantom_serial_gui.py
 **`A device attached to the system is not functioning` (Error 31)**
 - Loi Windows goi SetCommState tren CDC-ACM — da duoc xu ly san trong `phantom_serial_gui.py`, khong can lam gi them.
 
+**`ls /dev/ttyGS*` bao `No such file or directory` nhung `lsmod` da co `g_serial`**
+
+Nguyen nhan hay gap nhat: `config.txt` dang de `dr_mode=host`. O che do host, kernel khong tao UDC
+(USB Device Controller) nen `g_serial` khong bind vao dau duoc -> khong co `/dev/ttyGS0`.
+
+```bash
+CFG_BOOT="/boot/firmware/config.txt"; [ -f "$CFG_BOOT" ] || CFG_BOOT="/boot/config.txt"
+grep -n dwc2 "$CFG_BOOT"
+# Neu thay: dtoverlay=dwc2,dr_mode=host  -> SAI, phai sua:
+sudo sed -i 's/^dtoverlay=dwc2,dr_mode=host/dtoverlay=dwc2,dr_mode=peripheral/' "$CFG_BOOT"
+grep -n dwc2 "$CFG_BOOT"
+# Phai thay: dtoverlay=dwc2,dr_mode=peripheral
+sudo reboot
+```
+
+> Doi lai: khi de `peripheral`, cong micro-USB OTG khong cam duoc thiet bi USB host (hub, chuot,
+> USB ethernet) nua. Neu can ca hai, thu `dr_mode=otg`, nhung tren Pi Zero che do `otg` doi khi
+> khong do duoc cap thuong — `peripheral` chac chan hon.
+
 **`[SERIAL] opened` khong xuat hien trong log Pi**
 ```bash
-# Kiem tra module da load chua
-lsmod | grep g_serial
+# 1. Kiem tra module da load chua
+lsmod | grep -E 'dwc2|g_serial'
 # Neu chua co:
 sudo modprobe g_serial
-# Kiem tra lai cmdline.txt
-cat /boot/firmware/cmdline.txt | grep dwc2
+
+# 2. Kiem tra cmdline.txt — phai la MOT DONG duy nhat, co modules-load=dwc2,g_serial
+CMDLINE="/boot/firmware/cmdline.txt"; [ -f "$CMDLINE" ] || CMDLINE="/boot/cmdline.txt"
+cat "$CMDLINE"
+wc -l "$CMDLINE"   # ket qua 0 hoac 1 la dung; >= 2 la file bi xuong dong -> kernel bo qua
+
+# 3. Kiem tra dr_mode (xem muc ngay tren)
+CFG_BOOT="/boot/firmware/config.txt"; [ -f "$CFG_BOOT" ] || CFG_BOOT="/boot/config.txt"
+grep -n dwc2 "$CFG_BOOT"
+
+# 4. Xac nhan da co UDC (rong = chua o che do peripheral)
+ls /sys/class/udc/
 ```
 
 **COM port hien trong Device Manager nhung Connect that bai**

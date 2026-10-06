@@ -73,7 +73,7 @@ Co 2 che do chinh:
     }
   },
   "updated_at": "2026-06-02T10:20:30+07:00",
-  "config_path": "/home/pizero21/rec/pi_identity_config.json",
+  "config_path": "/home/pizero24/rec/pi_identity_config.json",
   "mac_address": "b8:27:eb:xx:xx:xx"
 }
 ```
@@ -179,7 +179,7 @@ Co 2 che do chinh:
 {
   "ok": true,
   "message": "config saved, service restarting",
-  "config_path": "/home/pizero21/rec/pi_identity_config.json"
+  "config_path": "/home/pizero24/rec/pi_identity_config.json"
 }
 ```
 
@@ -212,7 +212,7 @@ curl -X POST "http://<PI_IP>:8765/api/public-key" \
 {
   "ok": true,
   "message": "public key saved, service restarting",
-  "key_path": "/home/pizero21/public.key",
+  "key_path": "/home/pizero24/public.key",
   "size": 32
 }
 ```
