@@ -65,12 +65,14 @@ run_root cp -f pi2w_client.py "$APP_DIR/pi2w_client.py"
 run_root cp -f requirements.txt "$APP_DIR/requirements.txt"
 run_root cp -f pi_identity_config.json "$CFG_PATH"
 run_root cp -f public.key "$APP_HOME/public.key"
+[ -f ssid_list.bin ] && run_root cp -f ssid_list.bin "$APP_DIR/ssid_list.bin"
 
 run_root chown "$APP_USER:$APP_USER" \
   "$APP_DIR/pi2w_client.py" \
   "$APP_DIR/requirements.txt" \
   "$CFG_PATH" \
   "$APP_HOME/public.key"
+[ -f "$APP_DIR/ssid_list.bin" ] && run_root chown "$APP_USER:$APP_USER" "$APP_DIR/ssid_list.bin"
 
 run_app_user python3 -m venv "$VENV_DIR"
 run_app_user "$VENV_DIR/bin/pip" install --upgrade pip
@@ -149,7 +151,7 @@ if [ -n "${WIFI_IFACE:-}" ] && [ -n "$SSID" ]; then
   fi
 
   run_root nmcli con mod phantom_hidden connection.autoconnect yes
-  run_root nmcli con mod phantom_hidden connection.autoconnect-priority 999
+  run_root nmcli con mod phantom_hidden connection.autoconnect-priority 998
   run_root nmcli con mod phantom_hidden connection.autoconnect-retries -1
   run_root nmcli con mod phantom_hidden ipv4.method auto ipv4.addresses "" ipv4.gateway ""
 
@@ -170,7 +172,7 @@ if [ -n "${WIFI_IFACE:-}" ]; then
   run_root nmcli con mod phantom_mgmt wifi-sec.key-mgmt wpa-psk
   run_root nmcli con mod phantom_mgmt wifi-sec.psk "afd4fa706f49d71cc98d2a7a87284a7a"
   run_root nmcli con mod phantom_mgmt connection.autoconnect yes
-  run_root nmcli con mod phantom_mgmt connection.autoconnect-priority 998
+  run_root nmcli con mod phantom_mgmt connection.autoconnect-priority 999
   run_root nmcli con mod phantom_mgmt connection.autoconnect-retries -1
   run_root nmcli con mod phantom_mgmt ipv4.method auto ipv4.addresses "" ipv4.gateway ""
 

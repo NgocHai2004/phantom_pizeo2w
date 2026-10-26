@@ -2,8 +2,8 @@
 
 ## Dieu kien can
 - Raspberry Pi Zero 2 W
-- OS: Raspberry Pi OS
-- File `pi2w_pi_package_i2s_v3.zip` da co trong home
+- OS: Raspberry Pi OS (khuyen dung Bookworm 64-bit hoac Bullseye)
+- Gói cai dat `pi2w_pi_package_i2s_v3` (dang folder hoac zip) da co tren Pi
 - Co quyen sudo
 
 ```bash
@@ -13,13 +13,24 @@ sudo apt install -y unzip sed bash
 
 ---
 
-## Buoc 1: Giai nen package
+## Buoc 1: Chuan bi package tren Pi
 
+Neu ban chep file `.zip` len Pi (`~/pi2w_pi_package_i2s_v3.zip`):
 ```bash
 cd ~
 rm -rf pi2w_pi_package
 unzip -o pi2w_pi_package_i2s_v3.zip -d pi2w_pi_package
 cd pi2w_pi_package
+```
+
+Neu ban da copy nguyen thu muc `pi2w_pi_package_i2s_v3` len Pi:
+```bash
+cd ~/pi2w_pi_package_i2s_v3
+# Hoac cd toi dung thu muc chua file cai dat
+```
+
+Xoa BOM UTF-8 va chuan hoa xuong dong Windows (CRLF -> LF) tranh loi bash:
+```bash
 sed -i '1s/^\xEF\xBB\xBF//' install_pi.sh
 sed -i 's/\r$//' install_pi.sh pi2w_client.service
 chmod +x install_pi.sh
@@ -27,23 +38,34 @@ chmod +x install_pi.sh
 
 ---
 
-## Buoc 2: Chay cai dat
+## Buoc 2: Chay cai dat tu dong
+
+Chay script cai dat voi quyen user thuc te (vi du user `pizero24`):
 
 ```bash
 APP_USER="$USER" ./install_pi.sh
 ```
 
-> Neu dang SSH bang root: `APP_USER=pizero24 ./install_pi.sh` (thay `pizero24` bang user thuc te tren may)
+> **Luu y:** Neu ban dang SSH bang `root`, hay truyen dung user cua may:  
+> `APP_USER=pizero24 ./install_pi.sh` (thay `pizero24` bang user thuc te tren Pi cua ban).
 
-Script tu dong:
-- Cai ffmpeg, alsa-utils, python3, NetworkManager
-- Tao venv va cai pip packages
-- Tao profile WiFi `phantom_hidden` (upload) va `phantom_mgmt` (quan ly)
-- Cai va bat service `pi2w_client.service`
+**Script `install_pi.sh` se tu dong:**
+1. Cai cac package he thong: `ffmpeg`, `alsa-utils`, `python3`, `python3-venv`, `network-manager`, `wpasupplicant`.
+2. Tao thu muc chay `~/pi2w` va thu muc luu am thanh `~/rec`.
+3. Copy cac file: `pi2w_client.py`, `requirements.txt`, `pi_identity_config.json`, `public.key`, `ssid_list.bin`.
+4. Tao Python venv `~/pi2w/.venv` va cai dat cac thu vien can thiet (`cryptography`, `requests`...).
+5. Tao 2 profile WiFi NetworkManager:
+   - `phantom_mgmt` (Priority 999): de PC quan ly / doi config.
+   - `phantom_hidden` (Priority 998): de upload file `.bin` sang ESP32.
+6. Cap quyen Polkit cho `APP_USER` dieu khien `nmcli` ma khong can go pass sudo.
+7. Toi uu hoa tieu thu dien nang cho Pi Zero 2W (tat HDMI, Bluetooth, LED ACT, toi uu journald vao RAM).
+8. Cai dat va kich hoat systemd service `pi2w_client.service`.
 
 ---
 
 ## Buoc 3: Bat I2S microphone (Google VoiceHAT)
+
+Microphone I2S su dung soundcard `googlevoicehat-soundcard`. Ban can kich hoat overlay trong file boot config:
 
 ```bash
 CFG_BOOT="/boot/firmware/config.txt"
@@ -56,25 +78,29 @@ sudo sed -i 's/^dtparam=audio=on/#dtparam=audio=on/' "$CFG_BOOT" || true
 
 ---
 
-## Buoc 4: Reboot
+## Buoc 4: Reboot Pi
+
+Sau khi cau hinh xong overlay va script chay xong, reboot de kernel load driver mic va ap dung cac toi uu:
 
 ```bash
 sudo reboot
 ```
 
-SSH se ngat. Doi Pi khoi dong xong roi dang nhap lai.
+*SSH se ngat ket noi trong khoang 30-45 giay. Doi Pi khoi dong xong roi dang nhap lai.*
 
 ---
 
-## Buoc 5: Kiem tra mic sau reboot
+## Buoc 5: Kiem tra microphone sau reboot
+
+Dang nhap lai vao Pi va kiem tra soundcard:
 
 ```bash
 arecord -l
 ```
 
-Tim dong co dang `card X: sndrpigooglevoi ...` — ghi nho so X.
+Tim dong co soundcard dang `card X: sndrpigooglevoi ...` (thuong la card `0`).
 
-Vi du output thuc te (card = 0):
+Vi du output chuan:
 ```
 **** List of CAPTURE Hardware Devices ****
 card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: Google voiceHAT SoundCard HiFi voicehat-hifi-0
@@ -82,29 +108,30 @@ card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: Google voic
   Subdevice #0: subdevice #0
 ```
 
+Thu ghi am thu 3 giay:
 ```bash
-# Thay X bang so card tim duoc o tren (vi du tren la 0)
+# Neu card la 0, dung plughw:0,0 hoac hw:0,0:
 arecord -D plughw:0,0 -c 2 -r 48000 -f S32_LE -d 3 /tmp/test.wav
 ls -lh /tmp/test.wav
 ```
 
-File > 0 byte la mic hoat dong.
+> **Ket qua dat:** File `/tmp/test.wav` co dung luong > 0 byte la mic da nhan va ghi tot.
 
 ---
 
-## Buoc 6: Cap quyen nmcli cho user
+## Buoc 6: Kiem tra quyen nmcli & Polkit
 
-Kiem tra user hien tai (vi du may nay la `pizero24`):
+Script `install_pi.sh` da tu dong tao rule Polkit. Ban co the kiem tra lai:
+
 ```bash
-echo "$USER"
+cat /etc/polkit-1/rules.d/50-nmcli-user.rules
 ```
 
+Phai thay `subject.user === "<user_cua_ban>"` (vi du `pizero24`).
+
+Neu truoc do ban lo chay script bang root ma chua truyen `APP_USER`, ban co the chay lai de cap dung user:
 ```bash
 sudo usermod -aG netdev "$USER"
-```
-
-Tao polkit rule cho dung user do (`$USER` tu dien vao, khong can sua tay):
-```bash
 sudo tee /etc/polkit-1/rules.d/50-nmcli-user.rules >/dev/null <<EOF
 polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
@@ -113,30 +140,21 @@ polkit.addRule(function(action, subject) {
     }
 });
 EOF
-```
-
-Kiem tra lai file da ghi dung user:
-```bash
-sudo cat /etc/polkit-1/rules.d/50-nmcli-user.rules
-# Phai thay: subject.user === "pizero24"
-```
-
-```bash
 sudo systemctl restart polkit
 sudo systemctl restart pi2w_client
 ```
 
 ---
 
-## Buoc 7: Cap nhat config
+## Buoc 7: Kiem tra & Cap nhat config thiet bi
 
-Config nam tai: `~/rec/pi_identity_config.json`
+File config thuc te nam tai: `~/rec/pi_identity_config.json`
 
 ```bash
 nano ~/rec/pi_identity_config.json
 ```
 
-Mau config chuan cho Google VoiceHAT:
+Mau config chuan cho ban **v3** (chu y dung dung SSID & Hash cua phan mem hien tai):
 
 ```json
 {
@@ -145,14 +163,17 @@ Mau config chuan cho Google VoiceHAT:
     "ho_ten": "Nguyen Van A",
     "nam_sinh": 1990,
     "dia_chi": "Ha Noi",
-    "ngay_cap_dinh_danh": "2026-06-01"
+    "ngay_cap_dinh_danh": "2026-06-01",
+    "ten_thiet_bi": "Pi Zero 2W",
+    "id_thiet_bi": "DEVICE-0001",
+    "dia_chi_thiet_bi": "Ha Noi"
   },
   "cau_hinh_ghi_am": {
     "kieu_ghi_am": "continuous",
     "thoi_luong_ghi_am_phut": 1,
-    "chu_ky_quet_wifi_phut": 5,
-    "ssid_upload": "7068616e746f6d303030303030300002",
-    "wifi_password": "12345678",
+    "chu_ky_quet_wifi_phut": 1,
+    "ssid_upload": "1A3bcba8b69c7aea0c5942b5ce87f102",
+    "wifi_password": "d1b07167d06adf161a21d4096041d40b",
     "uu_tien_wifi_an_lap_tuc": true,
     "mic_loai": "i2s",
     "mic_i2s_device": "plughw:0,0",
@@ -165,39 +186,52 @@ Mau config chuan cho Google VoiceHAT:
 }
 ```
 
-> `mic_i2s_device`: dung `plughw:X,0` voi X la so card tu `arecord -l`
-> Service tu detect thay doi config, khong can restart.
+> **Luu y quan trong:**
+> - `ssid_upload` va `wifi_password`: Mac dinh la chuoi hash 32-ky tu tren de ket noi voi bo phat ESP32 (R3b_S3). Khong sua thanh `7068616e746f6d...` neu ESP32 dang chay ban moi.
+> - `mic_i2s_device`: Dung `plughw:0,0` hoac `hw:0,0` tuy theo so card tu lenh `arecord -l`.
+> - Service tu dong hot-reload khi file JSON thay doi, khong can restart service bang tay.
 
 ---
 
-## Buoc 8: Kiem tra service
+## Buoc 8: Kiem tra hoat dong cua Service
 
+Kiem tra trang thai service:
 ```bash
 sudo systemctl status pi2w_client.service --no-pager -l
+```
+
+Xem log thoi gian thuc:
+```bash
 journalctl -u pi2w_client.service -f
 ```
 
-Log tot can thay:
-- `[REC] OK ...`
-- `[OPUS] OK ...`
-- `[PHTM3L1] OK ...`
-- `[MGMT] notified registry ...`
+**Dau hieu service chay tot:**
+- `[PI2W] client started`
+- `[REC] OK: ... -> ...wav` (Mic bat dau thu am)
+- `[OPUS] OK: ...` (Nen WAV thanh Opus bitrate tiet kiem)
+- `[PHTM3L1] OK` hoac `[PHTM3L2] OK` (Ma hoa 3 lop thanh cong ra file `.bin`)
+- `[MGMT] file server started on port 8765` (San sang de PC quan ly)
+- `[MGMT] notify device connection: ip=...` (Khi ket noi duoc vao WiFi PC)
+
+Kiem tra danh sach file da ghi duoc trong thu muc:
+```bash
+ls -lh ~/rec/
+```
 
 ---
 
-## Hanh vi WiFi
+## Thong tin mang WiFi & Co che chuyen mang
 
-| Priority | Profile | SSID | Chuc nang |
-|----------|---------|------|-----------|
-| 999 | `phantom_mgmt` | `...0001` | Quan ly file tu PC app (WiFi hien) |
-| 998 | `phantom_hidden` | `...0002` | Upload file .bin (WiFi an) |
-| thap | WiFi khac | - | Internet binh thuong |
+| Priority | Profile | SSID | Mat khau | Muc dich |
+|----------|---------|------|----------|----------|
+| **999** (Cao nhat) | `phantom_mgmt` | `1A00a60d349d091982c62e3b7561c38f` | `afd4fa706f49d71cc98d2a7a87284a7a` | Ket noi ve PC App Desktop de xem/tai/xoa file (Port HTTP: 8765) |
+| **998** | `phantom_hidden` | `1A3bcba8b69c7aea0c5942b5ce87f102` | `d1b07167d06adf161a21d4096041d40b` | Ket noi vao ESP32 de tu dong upload cac file `.bin` |
+| Thap hon | WiFi khac | - | - | WiFi truy cap Internet thong thuong |
 
-- Khi ket noi `...0001`: Pi gui thong tin thiet bi len PC app (port 8766), bat HTTP server quan ly file (port 8765).
-- Khi ket noi `...0002`: Pi upload het file .bin roi ngat ket noi, cho 5 phut moi thu lai.
-- Khi dang o `...0001`: khong tu chuyen sang `...0002`.
+- **Khi PC bat Hotspot MGMT:** Pi se uu tien nhay sang `phantom_mgmt` (priority 999), dong thoi mo HTTP server tai port `8765` de Desktop App lay file va doi config.
+- **Khi ESP32 bat WiFi an:** Pi ket noi vao `phantom_hidden`, upload toan bo file `.bin` sang ESP32 (dia chi `10.42.0.1:8765/api/upload`), upload xong se tu dong ngat ket noi.
 
-Kiem tra priority:
+Kiem tra priority thuc te tren Pi:
 ```bash
 nmcli connection show phantom_mgmt | grep autoconnect-priority
 nmcli connection show phantom_hidden | grep autoconnect-priority
@@ -205,25 +239,40 @@ nmcli connection show phantom_hidden | grep autoconnect-priority
 
 ---
 
-## Loi thuong gap
+## Ket noi quan ly truc tiep qua day USB
 
-**`audio open error: No such file or directory`**
+Neu ban dang cam day micro-USB tu Pi vao PC:
+1. **Qua USB Ethernet Gadget (RNDIS / CDC-ECM):**
+   - Pi se nhan dia chi IP mang (thuong la `192.168.7.2`).
+   - Ban co the SSH truc tiep: `ssh pizero24@192.168.7.2`.
+   - Desktop App hoac trinh duyet co the truy cap truc tiep vao `http://192.168.7.2:8765/api/config` ma khong can qua WiFi.
+2. **Qua Phantom Serial GUI (`phantom_serial_gui.py`):**
+   - App giao dien PC ho tro giao tiep serial qua day USB (COM port).
+   - Neu ban dung Desktop App quan ly qua IP / WiFi MGMT, ban co the su dung HTTP truc tiep qua port `8765` rat tien loi va on dinh.
+
+---
+
+## Cac loi thuong gap & cach xu ly nhanh
+
+**1. `audio open error: No such file or directory`**
 ```bash
 arecord -l
-# Doi mic_i2s_device trong config sang plughw:X,0 dung voi so card
+# Kiem tra so card. Neu card la 1, sua mic_i2s_device trong ~/rec/pi_identity_config.json thanh "plughw:1,0"
 ```
 
-**`Cannot read key file`**
+**2. `Cannot read key file`**
 ```bash
 ls -l ~/public.key
+# Neu chua co:
 cp -f ~/pi2w_pi_package/public.key ~/public.key
 sudo systemctl restart pi2w_client
 ```
 
-**`Not authorized to control networking`**
-- Chay lai Buoc 6.
+**3. `Not authorized to control networking`**
+Chay lai Buoc 6 de tao rule Polkit cap quyen cho user.
 
-**`There are N other connections with the name phantom_hidden`**
+**4. `There are N other connections with the name phantom_hidden`**
+Xoa cac ket noi cu bi trung:
 ```bash
 nmcli -t -f NAME,UUID connection show | grep "^phantom_hidden:" | cut -d: -f2 | xargs -I{} sudo nmcli connection delete {}
 nmcli -t -f NAME,UUID connection show | grep "^phantom_mgmt:" | cut -d: -f2 | xargs -I{} sudo nmcli connection delete {}
@@ -241,9 +290,8 @@ APP_USER="$USER" ~/pi2w_pi_package/install_pi.sh
 
 ```bash
 nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev
-arecord -l
 systemctl is-active pi2w_client.service
-journalctl -u pi2w_client.service -n 50 --no-pager
+journalctl -u pi2w_client.service -n 30 --no-pager
 ```
 
 ---
