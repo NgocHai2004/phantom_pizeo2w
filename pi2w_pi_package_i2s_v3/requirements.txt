@@ -1,4 +1,2 @@
 requests
-cryptography
-customtkinter
-pyinstaller
+cryptography

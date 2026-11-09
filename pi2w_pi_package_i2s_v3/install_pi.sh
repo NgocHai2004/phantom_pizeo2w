@@ -209,6 +209,7 @@ run_root systemctl restart polkit || true
 # Tat ca deu co the tat bang bien moi truong, vd: PT_WIFI_POWERSAVE=0 ./install_pi.sh
 # ============================================================================
 PT_ENABLE="${PT_ENABLE:-1}"
+PT_I2S="${PT_I2S:-1}"
 PT_HDMI="${PT_HDMI:-1}"
 PT_BLUETOOTH="${PT_BLUETOOTH:-1}"
 PT_ACT_LED="${PT_ACT_LED:-1}"
@@ -230,10 +231,10 @@ boot_cfg_add() {
   # $1 = dong can them; chi them neu chua co (idempotent)
   [ -n "$CFG_BOOT" ] || return 0
   if run_root grep -qxF "$1" "$CFG_BOOT"; then
-    echo "[POWER] already set: $1"
+    echo "[BOOT] already set: $1"
   else
     printf '%s\n' "$1" | run_root tee -a "$CFG_BOOT" >/dev/null
-    echo "[POWER] added to $CFG_BOOT: $1"
+    echo "[BOOT] added to $CFG_BOOT: $1"
     NEED_REBOOT=1
   fi
 }
@@ -244,6 +245,17 @@ disable_unit() {
     echo "[POWER] disabled: $1"
   fi
 }
+
+# --- Bat I2S microphone (Google VoiceHAT) ---
+if [ "$PT_I2S" = "1" ]; then
+  echo "[MIC] === Bat I2S Microphone (googlevoicehat-soundcard) ==="
+  boot_cfg_add "dtparam=i2s=on"
+  boot_cfg_add "dtoverlay=googlevoicehat-soundcard"
+  if [ -n "$CFG_BOOT" ]; then
+    run_root sed -i 's/^dtparam=audio=on/#dtparam=audio=on/' "$CFG_BOOT" || true
+  fi
+  echo "[MIC] Da cau hinh I2S microphone vao $CFG_BOOT"
+fi
 
 if [ "$PT_ENABLE" = "1" ]; then
   echo "[POWER] === Bat dau toi uu tieu thu dien ==="

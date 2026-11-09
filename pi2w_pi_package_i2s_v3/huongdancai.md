@@ -18,23 +18,12 @@ sudo apt install -y unzip sed bash
 Neu ban chep file `.zip` len Pi (`~/pi2w_pi_package_i2s_v3.zip`):
 ```bash
 cd ~
-rm -rf pi2w_pi_package
-unzip -o pi2w_pi_package_i2s_v3.zip -d pi2w_pi_package
-cd pi2w_pi_package
-```
-
-Neu ban da copy nguyen thu muc `pi2w_pi_package_i2s_v3` len Pi:
-```bash
-cd ~/pi2w_pi_package_i2s_v3
-# Hoac cd toi dung thu muc chua file cai dat
-```
-
-Xoa BOM UTF-8 va chuan hoa xuong dong Windows (CRLF -> LF) tranh loi bash:
-```bash
-sed -i '1s/^\xEF\xBB\xBF//' install_pi.sh
-sed -i 's/\r$//' install_pi.sh pi2w_client.service
+unzip -o pi2w_pi_package_i2s_v3.zip
+cd pi2w_pi_package_i2s_v3
 chmod +x install_pi.sh
 ```
+
+*(Luu y: Goi zip da duoc chuan hoa toan bo ky tu xuong dong Linux LF va quyen thuc thi).*
 
 ---
 
@@ -49,31 +38,31 @@ APP_USER="$USER" ./install_pi.sh
 > **Luu y:** Neu ban dang SSH bang `root`, hay truyen dung user cua may:  
 > `APP_USER=pizero24 ./install_pi.sh` (thay `pizero24` bang user thuc te tren Pi cua ban).
 
-**Script `install_pi.sh` se tu dong:**
+**Script `install_pi.sh` se tu dong hoan toan:**
 1. Cai cac package he thong: `ffmpeg`, `alsa-utils`, `python3`, `python3-venv`, `network-manager`, `wpasupplicant`.
 2. Tao thu muc chay `~/pi2w` va thu muc luu am thanh `~/rec`.
 3. Copy cac file: `pi2w_client.py`, `requirements.txt`, `pi_identity_config.json`, `public.key`, `ssid_list.bin`.
-4. Tao Python venv `~/pi2w/.venv` va cai dat cac thu vien can thiet (`cryptography`, `requests`...).
+4. Tao Python venv `~/pi2w/.venv` va cai dat cac thu vien can thiet (`cryptography`, `requests`).
 5. Tao 2 profile WiFi NetworkManager:
    - `phantom_mgmt` (Priority 999): de PC quan ly / doi config.
    - `phantom_hidden` (Priority 998): de upload file `.bin` sang ESP32.
 6. Cap quyen Polkit cho `APP_USER` dieu khien `nmcli` ma khong can go pass sudo.
-7. Toi uu hoa tieu thu dien nang cho Pi Zero 2W (tat HDMI, Bluetooth, LED ACT, toi uu journald vao RAM).
-8. Cai dat va kich hoat systemd service `pi2w_client.service`.
+7. Tu dong bat overlay I2S microphone (`googlevoicehat-soundcard`) vao file boot `config.txt`.
+8. Toi uu hoa tieu thu dien nang cho Pi Zero 2W (tat HDMI, Bluetooth, LED ACT, toi uu journald vao RAM).
+9. Cai dat va kich hoat systemd service `pi2w_client.service`.
 
 ---
 
-## Buoc 3: Bat I2S microphone (Google VoiceHAT)
+## Buoc 3: Kiem tra boot config I2S microphone (Tuy chon)
 
-Microphone I2S su dung soundcard `googlevoicehat-soundcard`. Ban can kich hoat overlay trong file boot config:
+Microphone I2S su dung driver `googlevoicehat-soundcard`. Script `install_pi.sh` o Buoc 2 da tu dong them vao boot config.
+Neu ban muon kiem tra lai:
 
 ```bash
 CFG_BOOT="/boot/firmware/config.txt"
 [ -f "$CFG_BOOT" ] || CFG_BOOT="/boot/config.txt"
 
-grep -q '^dtparam=i2s=on' "$CFG_BOOT" || echo 'dtparam=i2s=on' | sudo tee -a "$CFG_BOOT"
-grep -q '^dtoverlay=googlevoicehat-soundcard' "$CFG_BOOT" || echo 'dtoverlay=googlevoicehat-soundcard' | sudo tee -a "$CFG_BOOT"
-sudo sed -i 's/^dtparam=audio=on/#dtparam=audio=on/' "$CFG_BOOT" || true
+grep 'googlevoicehat' "$CFG_BOOT"
 ```
 
 ---

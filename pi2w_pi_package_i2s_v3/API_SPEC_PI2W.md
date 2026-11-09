@@ -1,4 +1,4 @@
-﻿# PI2W API SPEC (PC Integration)
+# PI2W API SPEC (PC Integration)
 
 Tai lieu nay mo ta cac API de app PC doc/sua config va thay public key tren Pi.
 

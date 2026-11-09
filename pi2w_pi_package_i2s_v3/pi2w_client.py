@@ -79,7 +79,7 @@ WIFI_CONNECTION_PROFILE = "phantom_hidden"
 MGMT_WIFI_CONNECTION_PROFILE = "phantom_mgmt"
 WIFI_IFACE = "wlan0"
 WIFI_CONNECT_TIMEOUT_SEC = 20
-WIFI_CONNECT_FAST_TIMEOUT_SEC = 8
+WIFI_CONNECT_FAST_TIMEOUT_SEC = 25
 WIFI_RETRY_INTERVAL_SEC = 120
 WIFI_SCAN_INTERVAL_SEC = 60           # 1 phut giua cac lan quet khi khong thay WiFi
 IMMEDIATE_HIDDEN_WIFI_CHECK_SEC = 5
@@ -2323,31 +2323,52 @@ def get_wlan_ip() -> Optional[str]:
     return None
 
 
+def get_default_gateway_ip() -> str:
+    """Lay IP gateway tren interface wlan0 de gui toi may phat hotspot."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "route", "show", "dev", WIFI_IFACE],
+            text=True, timeout=3,
+        )
+        for line in out.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
+                return parts[2]
+    except Exception:
+        pass
+    return "10.42.0.1"
+
+
 def sync_time_from_pc() -> None:
     """Lay thoi gian tu PC, tinh offset de ten file ghi am dung gio thuc.
     Chi dung offset neu PC time > Pi time (Pi dang chay cham hon thuc te).
     """
     global _time_offset_sec
-    try:
-        url = f"http://{REGISTRY_API_HOST}:{DEVICE_CONNECTION_API_PORT}/api/time"
-        resp = requests.get(url, timeout=3)
-        if resp.status_code != 200:
-            log(f"[TIME] sync failed: status={resp.status_code}")
-            return
-        data = resp.json()
-        unix_ms = data.get("unix_ms")
-        iso_time = data.get("iso")
-        if unix_ms is None or not iso_time:
-            log("[TIME] sync failed: missing unix_ms or iso field")
-            return
-        pc_time = unix_ms / 1000.0
-        local_time = datetime.now().timestamp()
-        offset = pc_time - local_time
-        # Chi dung offset khi PC time > Pi time; neu Pi dang nhanh hon thi giu nguyen
-        _time_offset_sec = max(0.0, offset)
-        log(f"[TIME] offset={_time_offset_sec:.1f}s pc={iso_time} (raw_offset={offset:.1f}s)")
-    except Exception as e:
-        log(f"[TIME] sync failed: {e}")
+    gw = get_default_gateway_ip()
+    hosts = [gw, REGISTRY_API_HOST] if gw != REGISTRY_API_HOST else [gw]
+    ports = [9090, 8766, DEVICE_CONNECTION_API_PORT]
+    for h in hosts:
+        for p in ports:
+            try:
+                url = f"http://{h}:{p}/api/time"
+                resp = requests.get(url, timeout=2)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # ho tro ca payload {ok: true, data: {unix_ms, iso}} va {unix_ms, iso}
+                    if "data" in data and isinstance(data["data"], dict):
+                        data = data["data"]
+                    unix_ms = data.get("unix_ms")
+                    iso_time = data.get("iso")
+                    if unix_ms and iso_time:
+                        pc_time = unix_ms / 1000.0
+                        local_time = datetime.now().timestamp()
+                        offset = pc_time - local_time
+                        _time_offset_sec = max(0.0, offset)
+                        log(f"[TIME] sync ok via {h}:{p} offset={_time_offset_sec:.1f}s pc={iso_time}")
+                        return
+            except Exception:
+                continue
+    log("[TIME] sync time failed across all candidate endpoints")
 
 
 def notify_device_connection() -> None:
@@ -2358,9 +2379,20 @@ def notify_device_connection() -> None:
         if ip is None:
             log("[MGMT] notify device connection: skip, no IP yet")
             return
-        url = f"http://{REGISTRY_API_HOST}:{DEVICE_CONNECTION_API_PORT}/api/device/connection"
-        requests.post(url, json={"ip": ip, "type": "A"}, timeout=3)
-        log(f"[MGMT] notify device connection: ip={ip}")
+        gw = get_default_gateway_ip()
+        hosts = [gw, REGISTRY_API_HOST] if gw != REGISTRY_API_HOST else [gw]
+        ports = [9090, DEVICE_CONNECTION_API_PORT]
+        for h in hosts:
+            for p in ports:
+                try:
+                    url = f"http://{h}:{p}/api/device/connection"
+                    r = requests.post(url, json={"ip": ip, "type": "A"}, timeout=3)
+                    if r.status_code == 200:
+                        log(f"[MGMT] notify device connection OK: ip={ip} type=A via {h}:{p}")
+                        return
+                except Exception:
+                    continue
+        log(f"[MGMT] notify device connection failed for all targets (ip={ip})")
     except Exception as e:
         log(f"[MGMT] notify device connection failed: {e}")
 
